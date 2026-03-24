@@ -1,0 +1,482 @@
+----------------------------------------------------------------------------------
+-- Company: 
+-- Engineer: 
+-- 
+-- Create Date: 02/27/2026 11:34:10 AM
+-- Design Name: 
+-- Module Name: toplevel - Behavioral
+-- Project Name: 
+-- Target Devices: 
+-- Tool Versions: 
+-- Description: 
+-- 
+-- Dependencies: 
+-- 
+-- Revision:
+-- Revision 0.01 - File Created
+-- Additional Comments:
+-- 
+----------------------------------------------------------------------------------
+
+
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+
+-- Uncomment the following library declaration if using
+-- arithmetic functions with Signed or Unsigned values
+use IEEE.NUMERIC_STD.ALL;
+
+-- Uncomment the following library declaration if instantiating
+-- any Xilinx leaf cells in this code.
+--library UNISIM;
+--use UNISIM.VComponents.all;
+
+use work.i2c_utilities.all;
+
+entity toplevel is
+    Port (
+        clk : in std_logic;
+        rst_btn : in std_logic;
+        
+        ttl_tx : out std_logic;
+        ttl_rx : in std_logic;
+        
+        ps2_clk : in std_logic;
+        ps2_data : in std_logic;
+        
+        i2c_scl : inout std_logic;
+        i2c_sda : inout std_logic       
+    );
+end toplevel;
+
+architecture Behavioral of toplevel is
+
+    component ps2_receiver is
+        Port ( ps2_clk : in STD_LOGIC;
+               ps2_data : in STD_LOGIC;
+               clk : in STD_LOGIC;
+               rst : in STD_LOGIC;
+               scan_code : out std_logic_vector(7 downto 0);
+               pulse : out STD_LOGIC
+         );
+    end component;
+    
+    component ps2_ascii_decoder is
+        Port ( clk : in STD_LOGIC;
+               rst : in STD_LOGIC;
+               ps2_scan_code : in STD_LOGIC_VECTOR (7 downto 0);
+               ps2_pulse : in STD_LOGIC;
+               ascii : out STD_LOGIC_VECTOR (7 downto 0);
+               ascii_pulse : out STD_LOGIC);
+    end component;
+    
+    component ttl_serial_uart is
+        GENERIC (
+            CONSTANT cnt_max : integer := 13021); 
+            port (
+            reset_n				: in std_logic; 
+            clk				: in std_logic; 
+            ena 				: in std_logic;	
+            idata				: in std_logic_vector(7 downto 0);
+            busy 				: out std_logic;
+            TX				: out std_logic;
+            RX        : in std_logic;
+            odata     : out std_logic_vector(7 downto 0);
+            rx_done   : out std_logic
+            );
+    end component;
+    
+    component Reset_Delay IS	
+    PORT (
+        SIGNAL iCLK : IN std_logic;	
+        SIGNAL oRESET : OUT std_logic
+			);	
+    END component;
+    
+    component i2c_arbiter is
+        Generic (
+            constant CLK_FREQ : integer := 125_000_000;
+            constant BUS_FREQ : integer := 100_000
+        );
+        Port (
+            clk : in STD_LOGIC;
+            rst : in STD_LOGIC;
+            
+            -- individual connections to drivers
+            req : in STD_LOGIC_VECTOR(NUM_DRIVERS-1 downto 0);
+            grant : out STD_LOGIC_VECTOR(NUM_DRIVERS-1 downto 0);
+            addr : in driver_addr_array_t;
+            cmd_len : in driver_len_array_t; -- bytes in this transaction, in total
+            cmds : in driver_cmd_array_t;
+            
+            -- read data outputs
+            read_data : out driver_read_array_t;
+            done : out STD_LOGIC_VECTOR(NUM_DRIVERS-1 downto 0);
+            
+            -- I2C master hardware connections
+            sda : inout STD_LOGIC;
+            scl : inout STD_LOGIC
+        );
+    end component;
+    
+    component i2c_7seg_user_logic is
+        Generic (
+            constant CLK_FREQ : integer := 50_000_000;
+            constant DELAY_TIM_MS : integer := 1
+        );
+        Port (
+            clk : in STD_LOGIC;
+            rst : in std_logic;
+            
+            iData : in std_logic_vector(15 downto 0);
+            ena : in std_logic;
+            busy : out std_logic;
+            
+            -- I2C arbiter control
+            arb_req : out std_logic;
+            arb_grant : in  std_logic;
+            arb_addr : out std_logic_vector(6 downto 0);
+            arb_cmd_len : out integer range 0 to MAX_CMDS;
+            arb_cmds : out i2c_cmd_array_t;
+            arb_done : in  std_logic
+        );
+    end component;
+    
+    component i2c_lcd_user_logic is
+        Generic (
+            CLK_FREQ : integer := 125_000_000
+        );
+        Port (
+            clk : in STD_LOGIC;
+            rst : in std_logic;
+            
+            -- LCD client interface
+            rs : in std_logic; -- 0 for command register, 1 for data register
+            data : in std_logic_vector(7 downto 0); -- byte to send (can be a control word or ASCII)
+            ena : in std_logic;
+            busy : out std_logic := '1';
+            
+            -- I2C arbiter control
+            arb_req : out std_logic;
+            arb_grant : in  std_logic;
+            arb_addr : out std_logic_vector(6 downto 0);
+            arb_cmd_len : out integer range 0 to MAX_CMDS;
+            arb_cmds : out i2c_cmd_array_t;
+            arb_done : in  std_logic
+        );
+    end component;
+    
+    signal ps2_pulse : std_logic;
+    signal ps2_scan_code : std_logic_vector(7 downto 0);
+    
+    signal ascii_pulse : std_logic;
+    signal ascii : std_logic_vector(7 downto 0);
+    
+    signal por : std_logic;
+    signal rst : std_logic;
+    signal rst_n : std_logic;
+    
+    signal ttl_en : std_logic;
+    signal ttl_busy : std_logic;
+    signal ttl_odata : std_logic_vector(7 downto 0);
+    signal ttl_rx_done : std_logic;
+    
+    -- I2C arbiter control
+	signal i2c_arb_req : STD_LOGIC_VECTOR(NUM_DRIVERS-1 downto 0);
+	signal i2c_arb_grant : STD_LOGIC_VECTOR(NUM_DRIVERS-1 downto 0);
+	signal i2c_arb_addr : driver_addr_array_t;
+	signal i2c_arb_cmd_len : driver_len_array_t;
+	signal i2c_arb_cmds : driver_cmd_array_t;
+	signal i2c_arb_done : STD_LOGIC_VECTOR(NUM_DRIVERS-1 downto 0);
+	signal i2c_arb_read_data : driver_read_array_t;
+    
+    -- I2C peripheral drivers
+    -- 7 segment
+    signal i2c_7seg_data : std_logic_vector(15 downto 0);
+    signal i2c_7seg_en : std_logic;
+    signal i2c_7seg_busy : std_logic;
+    -- LCD
+    signal i2c_lcd_rs : std_logic;
+    signal i2c_lcd_data : std_logic_vector(7 downto 0);
+    signal i2c_lcd_en : std_logic;
+    signal i2c_lcd_busy : std_logic;
+
+    -- State machine definitions for FIFO parsing
+    type rx_state_t is (RX_IDLE, RX_DECODE, WAIT_LCD_CTRL, POP_LCD_DATA, WAIT_LCD_DATA, POP_7SEG_HIGH, WAIT_7SEG_LOW);
+    signal rx_state : rx_state_t := RX_IDLE;
+    
+    constant RX_FIFO_DEPTH : integer := 64;
+    type fifo_t is array (0 to RX_FIFO_DEPTH-1) of std_logic_vector(7 downto 0);
+    signal rx_fifo : fifo_t := (others => x"00");
+    signal rx_fifo_wr_ptr : integer range 0 to RX_FIFO_DEPTH-1 := 0;
+    signal rx_fifo_rd_ptr : integer range 0 to RX_FIFO_DEPTH-1 := 0;    
+    signal rx_fifo_popped : std_logic_vector(7 downto 0);
+    
+    attribute MARK_DEBUG : string;
+    -- attribute MARK_DEBUG of XXXXXXX : signal is "TRUE";
+
+begin
+
+    Inst_ps2_reciever : ps2_receiver
+        port map (
+            ps2_clk => ps2_clk,
+            ps2_data => ps2_data,
+            clk => clk,
+            rst => rst,
+            scan_code => ps2_scan_code,
+            pulse => ps2_pulse
+         );
+    
+    Inst_ps2_ascii_decoder : ps2_ascii_decoder
+        port map (
+            clk => clk,
+            rst => rst,
+            ps2_scan_code => ps2_scan_code,
+            ps2_pulse => ps2_pulse,
+            ascii => ascii,
+            ascii_pulse => ascii_pulse
+        );
+        
+    Inst_ttl_serial_uart : ttl_serial_uart
+        GENERIC map (
+            cnt_max => 13021
+        ) 
+        port map (
+            reset_n => rst_n,
+            clk => clk,
+            ena => ttl_en,
+            idata => ascii,
+            busy => ttl_busy,
+            TX => ttl_tx,
+            RX => ttl_rx,
+            odata => ttl_odata,
+            rx_done => ttl_rx_done
+        );
+    
+    Inst_Reset_Delay : Reset_Delay
+    PORT map (
+        iCLK => clk,	
+        oRESET => por
+			);
+			
+	Inst_i2c_arbiter : i2c_arbiter
+        Generic map (
+            CLK_FREQ => 125_000_000,
+            BUS_FREQ => 100_000
+        )
+        Port map (
+            clk => clk,
+            rst => rst,
+            
+            -- individual connections to drivers
+            req => i2c_arb_req,
+            grant => i2c_arb_grant,
+            addr => i2c_arb_addr,
+            cmd_len => i2c_arb_cmd_len,
+            cmds => i2c_arb_cmds,
+            
+            -- read data outputs
+            read_data => i2c_arb_read_data,
+            done => i2c_arb_done,
+            
+            -- I2C master hardware connections
+            sda => i2c_sda,
+            scl => i2c_scl
+        );
+        
+    -- I2C arbiter device 0
+    Inst_i2c_lcd_user_logic : i2c_lcd_user_logic
+        Generic map (
+            CLK_FREQ => 125_000_000
+        )
+        Port map (
+            clk => clk,
+            rst => rst,
+            
+            -- LCD client interface
+            rs => i2c_lcd_rs,
+            data => i2c_lcd_data,
+            ena => i2c_lcd_en,
+            busy => i2c_lcd_busy,
+            
+            -- I2C arbiter control
+            arb_req => i2c_arb_req(0),
+            arb_grant => i2c_arb_grant(0),
+            arb_addr => i2c_arb_addr(0),
+            arb_cmd_len => i2c_arb_cmd_len(0),
+            arb_cmds => i2c_arb_cmds(0),
+            arb_done => i2c_arb_done(0)
+        );
+        
+    -- I2C arbiter device 1
+    Inst_i2c_7seg_user_logic : i2c_7seg_user_logic
+        Generic map (
+            CLK_FREQ => 125_000_000,
+            DELAY_TIM_MS => 5
+        )
+        Port map (
+            clk => clk,
+            rst => rst,
+            
+            iData => i2c_7seg_data,
+            ena => i2c_7seg_en,
+            busy => i2c_7seg_busy,
+            
+            -- I2C arbiter control
+            arb_req => i2c_arb_req(1),
+            arb_grant => i2c_arb_grant(1),
+            arb_addr => i2c_arb_addr(1),
+            arb_cmd_len => i2c_arb_cmd_len(1),
+            arb_cmds => i2c_arb_cmds(1),
+            arb_done => i2c_arb_done(1)
+        );
+    
+    rst <= por or rst_btn;
+    rst_n <= not rst;
+          
+    process(clk, rst)
+    begin
+        if rst = '1' then
+            rx_state <= RX_IDLE;
+            
+            -- no display
+            i2c_lcd_en <= '0';
+            i2c_7seg_en <= '0';
+            i2c_7seg_data <= (others => '0');
+            
+            -- no serial output
+            ttl_en <= '0';
+            
+            -- reset FIFO read and write pointers
+            rx_fifo_wr_ptr <= 0;
+            rx_fifo_rd_ptr <= 0;
+            
+        elsif rising_edge(clk) then
+            -- enable lines default 0 so pulse only for one clock cycle
+            i2c_lcd_en <= '0';
+            i2c_7seg_en <= '0';
+            
+            -- ASCII pulse extension until TTL serial acknowledges data
+            if ascii_pulse = '1' then -- upon incoming pulse
+                ttl_en <= '1'; -- assert ttl enable
+            end if;
+            if ttl_en <= '1' and ttl_busy = '1' then -- if enable is asserted and the UART becomes busy
+                ttl_en <= '0'; -- the data has been latched and we can deassert enable
+            end if;
+            
+            -- fills the FIFO
+            if ttl_rx_done = '1' then -- if UART data recieved
+                rx_fifo(rx_fifo_wr_ptr) <= ttl_odata; -- write to FIFO
+                if rx_fifo_wr_ptr = RX_FIFO_DEPTH-1 then -- if FIFO full
+                    rx_fifo_wr_ptr <= 0; -- wrap and overwrite
+                else
+                    rx_fifo_wr_ptr <= rx_fifo_wr_ptr + 1; -- else increment ptr
+                end if;
+            end if;
+            
+            -- empties the FIFO
+            case rx_state is
+                when RX_IDLE => -- process beginning of command when byte comes in
+                    if rx_fifo_wr_ptr /= rx_fifo_rd_ptr then -- if FIFO not empty
+                        rx_fifo_popped <= rx_fifo(rx_fifo_rd_ptr); -- pop byte
+                        
+                        -- increment/wrap read pointer
+                        if rx_fifo_rd_ptr = RX_FIFO_DEPTH-1 then
+                            rx_fifo_rd_ptr <= 0; 
+                        else
+                            rx_fifo_rd_ptr <= rx_fifo_rd_ptr + 1;
+                        end if;
+                        
+                        rx_state <= RX_DECODE; -- decode this byte
+                    end if;
+                    
+                when RX_DECODE => -- decode command from first byte
+                    if rx_fifo_popped = x"01" then -- route single byte to LCD control
+                        rx_state <= WAIT_LCD_CTRL;
+                    elsif rx_fifo_popped = x"02" then -- route to LCD data
+                        rx_state <= POP_LCD_DATA;
+                    elsif rx_fifo_popped = x"03" then -- route 16-bit word to 7 segment
+                        rx_state <= POP_7SEG_HIGH;
+                    else
+                        rx_state <= RX_IDLE; -- were cooked
+                    end if;
+                    
+                when WAIT_LCD_CTRL => -- wait for LCD ready and data byte in FIFO
+                    if (i2c_lcd_busy = '0') and (rx_fifo_wr_ptr /= rx_fifo_rd_ptr) then
+                        i2c_lcd_rs <= '0'; -- 0 for LCD instruction register
+                        i2c_lcd_data <= rx_fifo(rx_fifo_rd_ptr); -- data is this new byte
+                        i2c_lcd_en <= '1'; -- start transmission
+                        
+                        -- increment/wrap read pointer
+                        if rx_fifo_rd_ptr = RX_FIFO_DEPTH-1 then
+                            rx_fifo_rd_ptr <= 0; 
+                        else
+                            rx_fifo_rd_ptr <= rx_fifo_rd_ptr + 1;
+                        end if;
+                        
+                        rx_state <= RX_IDLE; -- data byte written so we're good
+                    end if;
+                    
+                when POP_LCD_DATA => -- get byte from FIFO for LCD data
+                    if rx_fifo_wr_ptr /= rx_fifo_rd_ptr then -- if data in FIFO
+                        rx_fifo_popped <= rx_fifo(rx_fifo_rd_ptr); -- pop
+                        
+                        -- increment/wrap read pointer
+                        if rx_fifo_rd_ptr = RX_FIFO_DEPTH-1 then
+                            rx_fifo_rd_ptr <= 0; 
+                        else
+                            rx_fifo_rd_ptr <= rx_fifo_rd_ptr + 1;
+                        end if;
+                        
+                        rx_state <= WAIT_LCD_DATA; -- write the data
+                    end if;
+                    
+                when WAIT_LCD_DATA => -- handle popped LCD data
+                    if rx_fifo_popped = x"00" then -- null terminator
+                        rx_state <= RX_IDLE;
+                        
+                    elsif i2c_lcd_busy = '0' then -- ready to write
+                        i2c_lcd_rs <= '1'; -- 1 for LCD DDRAM
+                        i2c_lcd_data <= rx_fifo_popped;
+                        i2c_lcd_en <= '1';
+                        
+                        rx_state <= POP_LCD_DATA; -- go back for next character
+                    end if;
+                    
+                when POP_7SEG_HIGH => -- first byte of 7 segment instruction
+                    if rx_fifo_wr_ptr /= rx_fifo_rd_ptr then -- if FIFO has data
+                        i2c_7seg_data(15 downto 8) <= rx_fifo(rx_fifo_rd_ptr); -- pop to upper 7 segment data input register
+                        
+                        -- increment/wrap read pointer
+                        if rx_fifo_rd_ptr = RX_FIFO_DEPTH-1 then
+                            rx_fifo_rd_ptr <= 0; 
+                        else
+                            rx_fifo_rd_ptr <= rx_fifo_rd_ptr + 1;
+                        end if;
+                       
+                        rx_state <= WAIT_7SEG_LOW; -- pop low 7 seg byte, waiting for display and FIFO
+                    end if;
+                    
+                when WAIT_7SEG_LOW => -- gets the second byte from FIFO, waiting until it arrives and 7 seg driver ready
+                    if (i2c_7seg_busy = '0') and (rx_fifo_wr_ptr /= rx_fifo_rd_ptr) then
+                        i2c_7seg_data(7 downto 0) <= rx_fifo(rx_fifo_rd_ptr); -- pop to lower 7 segment data
+                        i2c_7seg_en <= '1'; -- Start transmission
+                       
+                        -- increment/wrap read pointer
+                        if rx_fifo_rd_ptr = RX_FIFO_DEPTH-1 then
+                            rx_fifo_rd_ptr <= 0; 
+                        else
+                            rx_fifo_rd_ptr <= rx_fifo_rd_ptr + 1;
+                        end if;
+                       
+                        rx_state <= RX_IDLE;
+                    end if;
+                    
+                when others =>
+                    rx_state <= RX_IDLE;
+            end case;
+            
+        end if;
+    end process;
+
+end Behavioral;
