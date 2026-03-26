@@ -2,6 +2,8 @@ library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
 use IEEE.NUMERIC_STD.ALL;
 
+use work.i2c_utilities.all;
+
 entity i2c_lcd_user_logic is
     Generic ( CLK_FREQ : integer := 125_000_000 );
     Port (
@@ -32,14 +34,26 @@ architecture Behavioral of i2c_lcd_user_logic is
     
     signal init_idx : integer range 0 to 10 := 0;
     signal timer    : unsigned(31 downto 0) := (others => '0');
+    
+    --Reset NOT sig
+    signal rst_n   : std_logic;
 
 begin
+    --Reset NOT
+    rst_n        <= not rst ;
     -- Instantiate the original I2C Master
     MASTER_INST : entity work.i2c_master
         generic map (input_clk => CLK_FREQ, bus_clk => 100_000)
         port map (
-            clk => clk, reset_n => not rst, ena => i2c_ena, addr => i2c_addr,
-            rw => i2c_rw, data_wr => i2c_data_wr, busy => i2c_busy, sda => sda, scl => scl
+            clk => clk, 
+            reset_n => rst_n, 
+            ena => i2c_ena, 
+            addr => i2c_addr,
+            rw => i2c_rw, 
+            data_wr => i2c_data_wr, 
+            busy => i2c_busy, 
+            sda => sda, 
+            scl => scl
         );
 
     busy <= '1' when state /= IDLE else '0';

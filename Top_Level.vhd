@@ -37,7 +37,8 @@ entity Top_Level is
         iClk                : in std_logic;
         
         PS2_Clk             : IN  STD_LOGIC;                     --clock signal from PS2 keyboard
-        PS2_Data            : IN  STD_LOGIC;   
+        PS2_Data            : IN  STD_LOGIC;
+           
         -- LCD I2C
         LCD_SDA             : inout std_logic;
         LCD_SCL             : inout std_logic;
@@ -47,9 +48,21 @@ entity Top_Level is
         led0_b              : out std_logic;
         led0_r              : out std_logic;
         led1_g              : out std_logic;
-    
+        
+        --PMOD LEDS
+        Pmod_LEDS           : out std_logic_vector(3 downto 0);
+        
+        --UART PINS
         UART_RX             : in std_logic;
         UART_TX             : out std_logic;
+        
+        --Left Rotary Encoder (Up Down)
+        L                   : in std_logic;
+        L_CLK               : in std_logic;
+        
+        --Right Rotary Encoder (Left Right)
+        R                   : in std_logic;
+        R_CLK               : in std_logic;
         
         --PMOD VGA!
         VS                  : out std_logic;
@@ -101,12 +114,26 @@ component i2c_lcd_user_logic is
 		
 		-- LCD client interface
 		rs          : in std_logic; -- 0 for command register, 1 for data register
-		data        : in std_logic_vector(7 downto 0); -- byte to send (can be a control word or ASCII)
+		data_in 	: in std_logic_vector(7 downto 0); -- byte to send (can be a control word or ASCII)
 		ena         : in std_logic;
 		busy        : out std_logic := '1';
-		sda			: inout std_logic;
-		scl			: inout std_logic
+		sda 		: inout std_logic;
+		scl 		: inout std_logic
+		
 	);
+end component;
+
+-------------------------------------------------------------------------------------------------
+
+component RotaryEN_SM is
+  Port (
+    reset    : IN std_logic;
+	clk      : IN std_logic;
+	A        : IN std_logic;
+	B        : IN std_logic;
+	count_en : OUT std_logic;
+	count_up : OUT std_logic
+  );
 end component;
 
 -------------------------------------------------------------------------------------------------
@@ -174,6 +201,7 @@ component uart is
     -- PS2 Keybord signals
     signal ascii_new         : std_logic;
     signal ascii_code        : std_logic_VECTOR(6 DOWNTO 0);
+    signal ascii_code8       : std_logic_VECTOR(7 DOWNTO 0);
     --Uart Signals
     signal ld_tx_data        : std_logic;
     signal ld_tx_pulse       : std_logic;
@@ -187,10 +215,16 @@ component uart is
     signal rx_data           : std_logic_Vector(7 downto 0);
     signal btn_sync          : std_logic_vector(1 downto 0);
     --LCD Signals
-    signal lcd_rs			: std_logic;
+    signal lcd_rs 			: std_logic;
 	signal lcd_en			: std_logic;
 	signal lcd_busy 		: std_logic;
-    signal lcd_data 		: std_logic_vector(7 downto 0);  
+    signal lcd_data 		: std_logic_vector(7 downto 0);
+    -- Direction moved fuck you ROTARY
+    signal direction        : std_logic_vector(3 downto 0); --Up, Down, Left, Right
+	signal count_enL : std_logic;
+	signal count_upL : std_logic;
+	signal count_enR : std_logic;
+	signal count_upR : std_logic;  
 
 --------------------------------------------------------------------------------------
 
@@ -202,7 +236,7 @@ Reset_Master   <= Reset_o or iReset;
 Reset_Master_n <= not Reset_Master;
 led0_g         <= ascii_new;
 led1_g         <= Reset_Master;
-lcd_data    <= '0' & ascii_code;
+lcd_data       <= '0' & ascii_code; 
 
 --led0_b         <= LCD_en;
 --rx_full        <= not rx_empty;
@@ -219,6 +253,27 @@ tx_pulse_process : process(tx_clk)
 			ld_tx_pulse   <= not btn_sync(1) and btn_sync(0);	
 		end if;
 	end process;
+	
+Pmod_LED_direction_TEST : process(iClk)
+    begin
+        Pmod_LEDS <= "0000";
+        if count_enL = '1' then 
+            if count_upL = '0' then
+                Pmod_LEDS(0) <= '1';
+            else
+                Pmod_LEDS(1) <= '1';
+            end if; 
+        end if;
+        
+        if count_enR = '1' then 
+            if count_upR = '0' then
+                Pmod_LEDS(2) <= '1';
+            else
+                Pmod_LEDS(3) <= '1';
+            end if; 
+        end if;
+         
+    end process;
 
     -- ==========================================
     -- Port Maping
@@ -254,14 +309,38 @@ init_I2C_LCD : i2c_lcd_user_logic
 		
 		-- LCD client interface
 		rs          => lcd_rs, -- 0 for command register, 1 for data register
-		data        => lcd_data, -- byte to send (can be a control word or ASCII)
+		data_in     => lcd_data, -- byte to send (can be a control word or ASCII)
 		ena         => lcd_en,
 		busy 		=> lcd_busy,
 		sda			=> LCD_SDA,
 		scl 		=> LCD_SCL
-
+		
 	);
 	
+-------------------------------------------------------------------------------------------------
+	
+inst_Rotary_EncoderL: RotaryEN_SM --Up, Down
+  Port map(
+    reset    => Reset_Master,
+	clk      => iClk,
+	A        => L,
+	B        => L_CLK,
+	count_en => count_enL,
+	count_up => count_upL
+  );
+
+-------------------------------------------------------------------------------------------------
+
+inst_Rotary_EncoderR: RotaryEN_SM --Left, Right
+  Port map(
+    reset    => Reset_Master,
+	clk      => iClk,
+	A        => L,
+	B        => L_CLK,
+	count_en => count_enR,
+	count_up => count_upR
+  );
+
 -------------------------------------------------------------------------------------------------
 
 inst_ps2_keyboard_to_ascii : ps2_keyboard_to_ascii
@@ -298,7 +377,7 @@ inst_uart : entity work.uart
             reset           =>   Reset_Master,
             txclk           =>   TX_Clk,
             ld_tx_data      =>   ld_tx_pulse,
-            tx_data         =>   ascii_code8,--ascii_code8,
+            tx_data         =>   lcd_data,--ascii_code8,
             tx_enable       =>   '1',
             tx_out          =>   UART_TX,    --The Pin to TX
             tx_empty        =>   open,
