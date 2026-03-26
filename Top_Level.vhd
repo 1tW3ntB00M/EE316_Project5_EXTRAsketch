@@ -103,15 +103,9 @@ component i2c_lcd_user_logic is
 		rs          : in std_logic; -- 0 for command register, 1 for data register
 		data        : in std_logic_vector(7 downto 0); -- byte to send (can be a control word or ASCII)
 		ena         : in std_logic;
-		busy        : out std_logic := '1'
-		
-		-- I2C arbiter control
---		arb_req     : out std_logic;
---		arb_grant   : in  std_logic;
---		arb_addr    : out std_logic_vector(6 downto 0);
---		arb_cmd_len : out integer range 0 to MAX_CMDS;
---		arb_cmds    : out i2c_cmd_array_t;
---		arb_done    : in  std_logic
+		busy        : out std_logic := '1';
+		sda			: inout std_logic;
+		scl			: inout std_logic
 	);
 end component;
 
@@ -180,7 +174,6 @@ component uart is
     -- PS2 Keybord signals
     signal ascii_new         : std_logic;
     signal ascii_code        : std_logic_VECTOR(6 DOWNTO 0);
-    signal ascii_code8       : std_logic_VECTOR(7 DOWNTO 0);
     --Uart Signals
     signal ld_tx_data        : std_logic;
     signal ld_tx_pulse       : std_logic;
@@ -194,8 +187,10 @@ component uart is
     signal rx_data           : std_logic_Vector(7 downto 0);
     signal btn_sync          : std_logic_vector(1 downto 0);
     --LCD Signals
-    signal LCD_en            : std_logic;
-    signal LCD_Cntrl         : std_logic;    
+    signal lcd_rs			: std_logic;
+	signal lcd_en			: std_logic;
+	signal lcd_busy 		: std_logic;
+    signal lcd_data 		: std_logic_vector(7 downto 0);  
 
 --------------------------------------------------------------------------------------
 
@@ -207,7 +202,7 @@ Reset_Master   <= Reset_o or iReset;
 Reset_Master_n <= not Reset_Master;
 led0_g         <= ascii_new;
 led1_g         <= Reset_Master;
-ascii_code8    <= '0' & ascii_code;
+lcd_data    <= '0' & ascii_code;
 
 --led0_b         <= LCD_en;
 --rx_full        <= not rx_empty;
@@ -258,17 +253,13 @@ init_I2C_LCD : i2c_lcd_user_logic
 		rst         => Reset_Master,
 		
 		-- LCD client interface
-		rs          => LCD_Cntrl, -- 0 for command register, 1 for data register
-		data        => ascii_code8, -- byte to send (can be a control word or ASCII)
-		ena         => LCD_en
-		
-		-- I2C arbiter control
---		arb_req     : out std_logic;
---		arb_grant   : in  std_logic;
---		arb_addr    : out std_logic_vector(6 downto 0);
---		arb_cmd_len : out integer range 0 to MAX_CMDS;
---		arb_cmds    : out i2c_cmd_array_t;
---		arb_done    : in  std_logic
+		rs          => lcd_rs, -- 0 for command register, 1 for data register
+		data        => lcd_data, -- byte to send (can be a control word or ASCII)
+		ena         => lcd_en,
+		busy 		=> lcd_busy,
+		sda			=> LCD_SDA,
+		scl 		=> LCD_SCL
+
 	);
 	
 -------------------------------------------------------------------------------------------------
