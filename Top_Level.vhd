@@ -224,7 +224,23 @@ component uart is
 	signal count_enL : std_logic;
 	signal count_upL : std_logic;
 	signal count_enR : std_logic;
-	signal count_upR : std_logic;  
+	signal count_upR : std_logic;
+
+	-- Control Registers
+	signal current_color : std_logic_vector(23 downto 0) := x"FFFFFF"; -- Default White
+	signal pen_width     : integer range 1 to 3 := 1;
+	signal sketch_size   : std_logic := '0'; -- 0 for S1, 1 for S2
+
+	-- Buffer for typing (up to 16 chars)
+	type char_array is array (0 to 15) of std_logic_vector(7 downto 0);
+	signal cmd_buffer : char_array := (others => x"20"); 
+	signal buf_ptr    : integer range 0 to 15 := 0;
+
+	-- FSM for LCD/System Manager
+	type main_state_t is (BOOT_DELAY, SEND_READY, IDLE, TX_CHAR, CMD_PARSE);
+	signal main_state : main_state_t := BOOT_DELAY;
+	signal ready_str  : string(1 to 14) := "Hardware Ready";
+	signal str_ptr    : integer range 1 to 15 := 1;
 
 --------------------------------------------------------------------------------------
 
@@ -244,6 +260,75 @@ lcd_data       <= '0' & ascii_code;
     -- ==========================================
     -- MIC Processes
     -- ==========================================
+
+-- Drive the Onboard RGB LED with the current pen color
+led0_r <= '0' when current_color(23 downto 16) > x"7F" else '1'; -- Simple threshold for now
+led0_g <= '0' when current_color(15 downto 8)  > x"7F" else '1';
+led0_b <= '0' when current_color(7 downto 0)   > x"7F" else '1';
+
+LCD_MANAGER : process(iClk, Reset_Master)
+begin
+    if Reset_Master = '1' then
+        main_state <= BOOT_DELAY;
+        str_ptr <= 1;
+        buf_ptr <= 0;
+        lcd_en <= '0';
+    elsif rising_edge(iClk) then
+        lcd_en <= '0'; -- Default pulse
+
+        case main_state is
+            when BOOT_DELAY =>
+                if lcd_busy = '0' then main_state <= SEND_READY; end if;
+
+            when SEND_READY =>
+                if lcd_busy = '0' then
+                    lcd_rs   <= '1';
+                    lcd_data <= std_logic_vector(to_unsigned(character'pos(ready_str(str_ptr)), 8));
+                    lcd_en   <= '1';
+                    if str_ptr < 14 then str_ptr <= str_ptr + 1;
+                    else main_state <= IDLE; end if;
+                end if;
+
+            when IDLE =>
+                if ascii_new = '1' then
+                    if ascii_code = x"0D" then -- ENTER
+                        main_state <= CMD_PARSE;
+                    elsif ascii_code = x"08" then -- BACKSPACE
+                        if buf_ptr > 0 then buf_ptr <= buf_ptr - 1; end if;
+                        -- Add logic here to send "cursor back" command to LCD if desired
+                    else
+                        -- Store in buffer and echo to LCD
+                        cmd_buffer(buf_ptr) <= '0' & ascii_code;
+                        lcd_data <= '0' & ascii_code;
+                        lcd_rs   <= '1';
+                        lcd_en   <= '1';
+                        if buf_ptr < 15 then buf_ptr <= buf_ptr + 1; end if;
+                    end if;
+                end if;
+
+            when CMD_PARSE =>
+                -- Requirement: C[RRGGBB], W[1-3], S[1-2]
+                if cmd_buffer(0) = x"43" then -- 'C' for Color
+                    -- In a real app, you'd hex-decode cmd_buffer(1..6) here
+                    -- Simplified: Toggle to Red for demo
+                    current_color <= x"FF0000"; 
+                elsif cmd_buffer(0) = x"57" then -- 'W' for Width
+                    if cmd_buffer(1) = x"31" then pen_width <= 1;
+                    elsif cmd_buffer(1) = x"32" then pen_width <= 2;
+                    elsif cmd_buffer(1) = x"33" then pen_width <= 3; end if;
+                elsif cmd_buffer(0) = x"53" then -- 'S' for Size
+                    if cmd_buffer(1) = x"31" then sketch_size <= '0';
+                    elsif cmd_buffer(1) = x"32" then sketch_size <= '1'; end if;
+                end if;
+                
+                buf_ptr <= 0; -- Reset buffer for next word
+                main_state <= IDLE;
+                
+            when others => main_state <= IDLE;
+        end case;
+    end if;
+end process;
+
 
 tx_pulse_process : process(tx_clk)
 	begin
