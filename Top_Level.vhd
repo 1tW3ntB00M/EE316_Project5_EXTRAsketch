@@ -37,7 +37,8 @@ entity Top_Level is
         iClk                : in std_logic;
         
         PS2_Clk             : IN  STD_LOGIC;                     --clock signal from PS2 keyboard
-        PS2_Data            : IN  STD_LOGIC;   
+        PS2_Data            : IN  STD_LOGIC;
+           
         -- LCD I2C
         LCD_SDA             : inout std_logic;
         LCD_SCL             : inout std_logic;
@@ -47,9 +48,21 @@ entity Top_Level is
         led0_b              : out std_logic;
         led0_r              : out std_logic;
         led1_g              : out std_logic;
-    
+        
+        --PMOD LEDS
+        Pmod_LEDS           : out std_logic_vector(3 downto 0);
+        
+        --UART PINS
         UART_RX             : in std_logic;
         UART_TX             : out std_logic;
+        
+        --Left Rotary Encoder (Up Down)
+        L                   : in std_logic;
+        L_CLK               : in std_logic;
+        
+        --Right Rotary Encoder (Left Right)
+        R                   : in std_logic;
+        R_CLK               : in std_logic;
         
         --PMOD VGA!
         VS                  : out std_logic;
@@ -101,18 +114,26 @@ component i2c_lcd_user_logic is
 		
 		-- LCD client interface
 		rs          : in std_logic; -- 0 for command register, 1 for data register
-		data        : in std_logic_vector(7 downto 0); -- byte to send (can be a control word or ASCII)
+		data_in 	: in std_logic_vector(7 downto 0); -- byte to send (can be a control word or ASCII)
 		ena         : in std_logic;
-		busy        : out std_logic := '1'
+		busy        : out std_logic := '1';
+		sda 		: inout std_logic;
+		scl 		: inout std_logic
 		
-		-- I2C arbiter control
---		arb_req     : out std_logic;
---		arb_grant   : in  std_logic;
---		arb_addr    : out std_logic_vector(6 downto 0);
---		arb_cmd_len : out integer range 0 to MAX_CMDS;
---		arb_cmds    : out i2c_cmd_array_t;
---		arb_done    : in  std_logic
 	);
+end component;
+
+-------------------------------------------------------------------------------------------------
+
+component RotaryEN_SM is
+  Port (
+    reset    : IN std_logic;
+	clk      : IN std_logic;
+	A        : IN std_logic;
+	B        : IN std_logic;
+	count_en : OUT std_logic;
+	count_up : OUT std_logic
+  );
 end component;
 
 -------------------------------------------------------------------------------------------------
@@ -182,7 +203,7 @@ component uart is
     signal ascii_code        : std_logic_VECTOR(6 DOWNTO 0);
     signal ascii_code8       : std_logic_VECTOR(7 DOWNTO 0);
     --Uart Signals
-    signal ld_tx_data        : std_logic;
+    signal tx_data           : std_logic_vector(7 downto 0);
     signal ld_tx_pulse       : std_logic;
     signal uld_rx_data       : std_logic;
     signal rx_enable         : std_logic;
@@ -194,8 +215,44 @@ component uart is
     signal rx_data           : std_logic_Vector(7 downto 0);
     signal btn_sync          : std_logic_vector(1 downto 0);
     --LCD Signals
-    signal LCD_en            : std_logic;
-    signal LCD_Cntrl         : std_logic;    
+    signal lcd_rs 			: std_logic;
+	signal lcd_en			: std_logic;
+	signal lcd_busy 		: std_logic;
+    signal lcd_data 		: std_logic_vector(7 downto 0);
+    -- Direction moved fuck you ROTARY
+    signal direction        : std_logic_vector(3 downto 0); --Up, Down, Left, Right
+	signal dbL 	: std_logic;
+	signal dbL_CLK	: std_logic;
+	signal dbR 	: std_logic;
+	signal dbR_CLK	: std_logic;
+	signal count_enL : std_logic;
+	signal count_upL : std_logic;
+	signal count_enR : std_logic;
+	signal count_upR : std_logic;
+
+	-- Control Registers
+	signal current_color : std_logic_vector(23 downto 0) := x"00000000"; -- Default Black
+	signal pen_width     : std_logic_vector(1 downto 0) := 1;
+	signal sketch_size   : std_logic := '0'; -- 0 for S1, 1 for S2
+
+	-- Buffer for typing (up to 16 chars)
+	type char_array is array (0 to 15) of std_logic_vector(7 downto 0);
+	signal cmd_buffer : char_array := (others => x"20"); 
+	signal buf_ptr    : integer range 0 to 15 := 0;
+
+	-- FSM for LCD/System Manager
+	type main_state_t is (BOOT_DELAY, SEND_READY, IDLE, TX_CHAR, CMD_PARSE);
+	signal main_state : main_state_t := BOOT_DELAY;
+	signal ready_str  : string(1 to 14) := "Hardware Ready";
+	signal str_ptr    : integer range 1 to 15 := 1;
+
+	-- Sub-states for multi-byte UART transmission
+    	type uart_tx_state_t is (TX_IDLE, TX_START, TX_BYTE1, TX_BYTE2, TX_BYTE3, TX_WAIT1, TX_WAIT2, TX_WAIT3);
+    	signal tx_fsm : uart_tx_state_t := TX_IDLE;
+    
+    	-- Internal registers for parsed values
+    	signal hex_val : unsigned(3 downto 0); -- temporary for decoding
+
 
 --------------------------------------------------------------------------------------
 
@@ -207,7 +264,6 @@ Reset_Master   <= Reset_o or iReset;
 Reset_Master_n <= not Reset_Master;
 led0_g         <= ascii_new;
 led1_g         <= Reset_Master;
-ascii_code8    <= '0' & ascii_code;
 
 --led0_b         <= LCD_en;
 --rx_full        <= not rx_empty;
@@ -216,14 +272,175 @@ ascii_code8    <= '0' & ascii_code;
     -- MIC Processes
     -- ==========================================
 
-tx_pulse_process : process(tx_clk)
-	begin
-		if (rising_edge(tx_clk)) then
-			btn_sync(0) <= ascii_new;
-			btn_sync(1) <= btn_sync(0);
-			ld_tx_pulse   <= not btn_sync(1) and btn_sync(0);	
-		end if;
-	end process;
+-- ==========================================
+-- 1. Tri-Color LED Logic (Active Low for Cora-Z7)
+-- ==========================================
+led0_r <= '0' when current_color(23 downto 16) > x"7F" else '1';
+led0_g <= '0' when current_color(15 downto 8)  > x"7F" else '1';
+led0_b <= '0' when current_color(7 downto 0)   > x"7F" else '1';
+
+-- ==========================================
+-- 2. System Manager: Keyboard -> LCD/UART/Internal State
+-- ==========================================
+SYSTEM_MANAGER : process(iClk, Reset_Master)
+begin
+    if Reset_Master = '1' then
+        main_state <= BOOT_DELAY;
+        str_ptr <= 1;
+        buf_ptr <= 0;
+        lcd_en <= '0';
+        ld_tx_pulse <= '0';
+    elsif rising_edge(iClk) then
+        lcd_en <= '0'; 
+        ld_tx_pulse <= '0';
+
+        
+
+        case main_state is
+            when BOOT_DELAY =>
+                if lcd_busy = '0' then main_state <= SEND_READY; end if;
+
+            when SEND_READY =>
+                if lcd_busy = '0' then
+                    lcd_rs   <= '1';
+                    lcd_data <= std_logic_vector(to_unsigned(character'pos(ready_str(str_ptr)), 8));
+                    lcd_en   <= '1';
+                    ld_tx_pulse <= '1'; -- Send "Hardware Ready" to PC UART too
+                    if str_ptr < 14 then str_ptr <= str_ptr + 1;
+                    else main_state <= IDLE; end if;
+                end if;
+
+            when IDLE =>
+		-- Monitor Encoders for Movement Tags (Priority over typing)
+        	if count_enR = '1' then
+            		ld_tx_pulse <= '1';
+            		if count_upR = '1' then tx_data <= x"52"; -- 'R'
+            		else tx_data <= x"4C"; end if;           -- 'L'
+        	elsif count_enL = '1' then
+            		ld_tx_pulse <= '1';
+            		if count_upL = '1' then tx_data <= x"55"; -- 'U'
+            		else tx_data <= x"44"; end if;           -- 'D'
+        	end if;
+
+                if ascii_new = '1' then
+                    if ascii_code = x"0D" then -- ENTER
+                        main_state <= CMD_PARSE;
+                    elsif ascii_code = x"08" then -- BACKSPACE
+                        if buf_ptr > 0 then 
+			    buf_ptr <= buf_ptr - 1;
+			    main_state <= LCD_BS_STEP1; 
+			end if;
+                    else
+                        -- Echo to LCD and Buffer
+                        cmd_buffer(buf_ptr) <= '0' & ascii_code;
+                        lcd_data <= '0' & ascii_code;
+                        lcd_rs   <= '1';
+                        lcd_en   <= '1';
+                        if buf_ptr < 15 then buf_ptr <= buf_ptr + 1; end if;
+                    end if;
+                end if;
+
+            when CMD_PARSE =>
+                -- Color Change: #[RRGGBB] -> Tag '#'
+                if cmd_buffer(0) = x"23" then 
+                    -- Basic parsing: only first 2 chars for brevity, add others as needed
+		    if cmd_buffer(1) = x"66" and cmd_buffer(2) = x"66" then
+                	current_color(23 downto 16) <= x"FF";
+		    else current_color(23 downto 16) <= x"00";
+		    end if;
+		    if cmd_buffer(3) = x"66" and cmd_buffer(4) = x"66" then
+                	current_color(15 downto 8) <= x"FF";
+		    else current_color(15 downto 8) <= x"00";
+		    end if;
+		    if cmd_buffer(5) = x"66" and cmd_buffer(6) = x"66" then
+                	current_color(7 downto 0) <= x"FF";
+		    else current_color(7 downto 0) <= x"00";
+		    end if;
+
+                    main_state <= TX_CHAR; -- Go to multi-byte UART sender
+                    tx_fsm <= TX_START; 
+
+                -- Width Change: W[1-3] -> Tag 'W'
+                elsif cmd_buffer(0) = x"57" then
+                    pen_width <= cmd_buffer(1)(1 downto 0);
+                    main_state <= TX_CHAR;
+                    tx_fsm <= TX_START;
+
+                -- Size Change: S[1-2] -> Tag 'S'
+                elsif cmd_buffer(0) = x"53" then
+                    sketch_size <= cmd_buffer(1)(0);
+                    main_state <= TX_CHAR;
+                    tx_fsm <= TX_START;
+                end if;
+                
+                buf_ptr <= 0;
+                if main_state /= TX_CHAR then main_state <= IDLE; end if;
+
+	    when LCD_BS_STEP1 =>
+                if lcd_busy = '0' then
+                    lcd_rs <= '0'; lcd_data <= x"10"; -- Shift Left
+                    lcd_en <= '1'; main_state <= LCD_BS_STEP2;
+                end if;
+
+            when LCD_BS_STEP2 =>
+                if lcd_busy = '0' then
+                    lcd_rs <= '1'; lcd_data <= x"20"; -- Print Space
+                    lcd_en <= '1'; main_state <= LCD_BS_STEP3;
+                end if;
+
+            when LCD_BS_STEP3 =>
+                if lcd_busy = '0' then
+                    lcd_rs <= '0'; lcd_data <= x"10"; -- Shift Left again
+                    lcd_en <= '1'; main_state <= IDLE;
+                end if;
+
+            when TX_CHAR =>
+                -- Multi-byte UART Logic for Width/Size/Color
+		if tx_empty = '1' then
+                    case tx_fsm is
+	
+			when TX_START =>
+                    	    tx_data <= cmd_buffer(0); -- Send the Tag (#, W, or S)
+                    	    ld_tx_pulse <= '1';
+                	    tx_fsm <= TX_WAIT1;
+
+			when TX_WAIT1 => tx_fsm <= TX_BYTE1;
+
+                	when TX_BYTE1 =>
+                	    tx_data <= cmd_buffer(1); -- Send the Value
+                	    ld_tx_pulse <= '1';
+			    if cmd_buffer(0) = x"23" then
+				tx_fsm <= TX_WAIT2;
+			    else 
+				tx_fsm <= TX_IDLE;
+			    end if;
+
+			when TX_WAIT2 => tx_fsm <= TX_BYTE2;
+
+    			when TX_BYTE2 =>
+        		    tx_data <= cmd_buffer(2); -- Send Green
+        		    ld_tx_pulse <= '1';
+        		    tx_fsm <= TX_WAIT3;
+
+			when TX_WAIT3 => tx_fsm <= TX_BYTE3;
+
+    			when TX_BYTE3 =>
+        		    tx_data <= cmd_buffer(3); -- Send Blue
+        		    ld_tx_pulse <= '1';
+			    tx_fsm <= TX_IDLE;
+
+			when TX_IDLE =>
+                	    ld_tx_pulse <= '0'; -- Explicitly clear the load signal
+                	    main_state <= IDLE; -- Return to the main system flow
+
+			when others => tx_fsm <= TX_IDLE;
+		    end case;
+		endif;
+            when others => main_state <= IDLE;
+        end case;
+    end if;
+end process;
+
 
     -- ==========================================
     -- Port Maping
@@ -246,6 +463,54 @@ tx_pulse_process : process(tx_clk)
             TOGGLE_O => open,
             PULSE_O  => open
         );
+
+-------------------------------------------------------------------------------------------------
+    
+    inst_RotaryL : btn_debounce_toggle
+        generic map ( CNTR_MAX => X"0FFF" )
+        port map (
+            BTN_I    => L,
+            CLK      => iClk,
+            BTN_O    => dbL,
+            TOGGLE_O => open,
+            PULSE_O  => open
+        );
+
+-------------------------------------------------------------------------------------------------
+    
+    inst_RotaryL_clk : btn_debounce_toggle
+        generic map ( CNTR_MAX => X"0FFF" )
+        port map (
+            BTN_I    => L_CLK,
+            CLK      => iClk,
+            BTN_O    => dbL_CLK,
+            TOGGLE_O => open,
+            PULSE_O  => open
+        );
+
+-------------------------------------------------------------------------------------------------
+    
+    inst_RotaryR : btn_debounce_toggle
+        generic map ( CNTR_MAX => X"0FFF" )
+        port map (
+            BTN_I    => R,
+            CLK      => iClk,
+            BTN_O    => dbR,
+            TOGGLE_O => open,
+            PULSE_O  => open
+        );
+
+-------------------------------------------------------------------------------------------------
+    
+    inst_RotaryR_clk : btn_debounce_toggle
+        generic map ( CNTR_MAX => X"0FFF" )
+        port map (
+            BTN_I    => R_CLK,
+            CLK      => iClk,
+            BTN_O    => dbR_CLK,
+            TOGGLE_O => open,
+            PULSE_O  => open
+        );
         
 -------------------------------------------------------------------------------------------------
 
@@ -258,19 +523,39 @@ init_I2C_LCD : i2c_lcd_user_logic
 		rst         => Reset_Master,
 		
 		-- LCD client interface
-		rs          => LCD_Cntrl, -- 0 for command register, 1 for data register
-		data        => ascii_code8, -- byte to send (can be a control word or ASCII)
-		ena         => LCD_en
+		rs          => lcd_rs, -- 0 for command register, 1 for data register
+		data_in     => lcd_data, -- byte to send (can be a control word or ASCII)
+		ena         => lcd_en,
+		busy 		=> lcd_busy,
+		sda			=> LCD_SDA,
+		scl 		=> LCD_SCL
 		
-		-- I2C arbiter control
---		arb_req     : out std_logic;
---		arb_grant   : in  std_logic;
---		arb_addr    : out std_logic_vector(6 downto 0);
---		arb_cmd_len : out integer range 0 to MAX_CMDS;
---		arb_cmds    : out i2c_cmd_array_t;
---		arb_done    : in  std_logic
 	);
 	
+-------------------------------------------------------------------------------------------------
+	
+inst_Rotary_EncoderL: RotaryEN_SM --Up, Down
+  Port map(
+    reset    => Reset_Master,
+	clk      => iClk,
+	A        => dbL,
+	B        => dbL_CLK,
+	count_en => count_enL,
+	count_up => count_upL
+  );
+
+-------------------------------------------------------------------------------------------------
+
+inst_Rotary_EncoderR: RotaryEN_SM --Left, Right
+  Port map(
+    reset    => Reset_Master,
+	clk      => iClk,
+	A        => dbR,
+	B        => dbR_CLK,
+	count_en => count_enR,
+	count_up => count_upR
+  );
+
 -------------------------------------------------------------------------------------------------
 
 inst_ps2_keyboard_to_ascii : ps2_keyboard_to_ascii
@@ -307,10 +592,10 @@ inst_uart : entity work.uart
             reset           =>   Reset_Master,
             txclk           =>   TX_Clk,
             ld_tx_data      =>   ld_tx_pulse,
-            tx_data         =>   ascii_code8,--ascii_code8,
+            tx_data         =>   tx_data,--ascii_code8,
             tx_enable       =>   '1',
             tx_out          =>   UART_TX,    --The Pin to TX
-            tx_empty        =>   open,
+            tx_empty        =>   tx_empty,
             
             rxclk           =>   RX_Clk,
             uld_rx_data     =>   rx_full,
