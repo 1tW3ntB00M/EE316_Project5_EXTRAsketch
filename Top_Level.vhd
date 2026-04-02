@@ -310,7 +310,6 @@ begin
 					end if;
 				end if;
 				ld_tx_pulse <= '0'; -- Explicitly clear the load signal
-                main_state <= UPDATE_STATUS; -- Return to the main system flow
 			when TX_START =>
             	tx_data <= cmd_buffer(0); -- Send the Tag (#, W, or S)
                 ld_tx_pulse <= '1';
@@ -368,7 +367,6 @@ begin
                     lcd_rs   <= '1';
                     lcd_data <= std_logic_vector(to_unsigned(character'pos(ready_str(str_ptr)), 8));
                     lcd_en   <= '1';
-                    ld_tx_pulse <= '1'; -- Send "Hardware Ready" to PC UART too
                     if str_ptr < 14 then str_ptr <= str_ptr + 1;
                     else main_state <= IDLE; end if;
                 end if;
