@@ -205,6 +205,7 @@ component uart is
     --Uart Signals
     signal tx_data           : std_logic_vector(7 downto 0);
     signal ld_tx_pulse       : std_logic;
+	signal tx_empty          : std_logic;
     signal uld_rx_data       : std_logic;
     signal rx_enable         : std_logic;
     signal rx_empty          : std_logic;
@@ -342,6 +343,8 @@ begin
 
 			when others => tx_fsm <= TX_IDLE;
 		end case;
+	end if;
+end process;
 	
 -- ==========================================
 -- 2. LCD Manager: Keyboard -> LCD
