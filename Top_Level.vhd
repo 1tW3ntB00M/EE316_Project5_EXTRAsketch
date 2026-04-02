@@ -312,15 +312,17 @@ begin
 
             when IDLE =>
 		-- Monitor Encoders for Movement Tags (Priority over typing)
-        	if count_enR = '1' then
+        	if (count_enR = '1' or count_enL = '1') and tx_empty = '1' then
+				if count_enR = '1' then
             		ld_tx_pulse <= '1';
             		if count_upR = '1' then tx_data <= x"52"; -- 'R'
             		else tx_data <= x"4C"; end if;           -- 'L'
-        	elsif count_enL = '1' then
+        		elsif count_enL = '1' then
             		ld_tx_pulse <= '1';
             		if count_upL = '1' then tx_data <= x"55"; -- 'U'
             		else tx_data <= x"44"; end if;           -- 'D'
-        	end if;
+        		end if;
+			end if;
 
                 if ascii_new = '1' then
                     if ascii_code = x"0D" then -- ENTER
