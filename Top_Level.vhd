@@ -231,9 +231,9 @@ component uart is
 	signal count_upR : std_logic;
 
 	-- Control Registers
-	signal current_color : std_logic_vector(23 downto 0) := x"00000000"; -- Default Black
-	signal pen_width     : std_logic_vector(1 downto 0) := 1;
-	signal sketch_size   : std_logic := '0'; -- 0 for S1, 1 for S2
+	signal current_color : std_logic_vector(23 downto 0) := x"000000"; -- Default Black
+	signal pen_width     : std_logic_vector(1 downto 0) := "01";
+	signal sketch_size   : std_logic := '0'; -- 0 for S2, 1 for S1
 
 	-- Buffer for typing (up to 16 chars)
 	type char_array is array (0 to 15) of std_logic_vector(7 downto 0);
@@ -430,7 +430,12 @@ begin
             			when 0 => lcd_rs <= '0'; lcd_data <= x"C0"; -- Jump to Row 2
            				when 1 => lcd_rs <= '1'; lcd_data <= x"53"; -- 'S'
 						when 2 => lcd_rs <= '1'; lcd_data <= x"3A"; -- ':'
-            			when 3 => lcd_rs <= '1'; lcd_data <= x"30" or ("0000000" & sketch_size); -- '1' or '2'
+            			when 3 => lcd_rs <= '1';
+							if sketch_size = '1' then 
+        						lcd_data <= x"31"; -- Show '1'
+   							else 
+        						lcd_data <= x"32"; -- Show '2'
+    						end if;
             			when 4 => lcd_rs <= '1'; lcd_data <= x"20"; -- space
             			when 5 => lcd_rs <= '1'; lcd_data <= x"43"; -- 'C'
             			when 6 => lcd_rs <= '1'; lcd_data <= x"3A"; -- ':'
