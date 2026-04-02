@@ -138,6 +138,21 @@ end component;
 
 -------------------------------------------------------------------------------------------------
 
+component univ_bin_counter is
+   generic(N: integer := 8; N2: integer := 255; N1: integer := 0);
+   port(
+			clk, reset				   : in std_logic;
+			syn_clr, load, en, up	: in std_logic;
+			clk_en 					   : in std_logic := '1';			
+			d						      : in std_logic_vector(N-1 downto 0);
+			max_tick, min_tick		: out std_logic;
+			q						      : out std_logic_vector(N-1 downto 0)		
+   );
+end component;
+
+
+-------------------------------------------------------------------------------------------------
+
 component ps2_keyboard_to_ascii is
         GENERIC(
             clk_freq                  : INTEGER := 50_000_000; --system clock frequency in Hz
@@ -214,33 +229,21 @@ component uart is
     signal RX_Clk            : std_logic;
     signal rx_data           : std_logic_Vector(7 downto 0);
     signal btn_sync          : std_logic_vector(1 downto 0);
+    signal TX_Pulserator     : std_logic;
     --LCD Signals
-    signal lcd_rs 			: std_logic;
-	signal lcd_en			: std_logic;
-	signal lcd_busy 		: std_logic;
-    signal lcd_data 		: std_logic_vector(7 downto 0);
+    signal lcd_rs 			 : std_logic;
+	signal lcd_en			 : std_logic;
+	signal lcd_busy 		 : std_logic;
+    signal lcd_data 		 : std_logic_vector(7 downto 0);
+    -- Counter Signals
+    signal position_X        : std_logic_vector(7 downto 0); 
+    signal position_Y        : std_logic_vector(7 downto 0);
     -- Direction moved fuck you ROTARY
-    signal direction        : std_logic_vector(3 downto 0); --Up, Down, Left, Right
-	signal count_enL : std_logic;
-	signal count_upL : std_logic;
-	signal count_enR : std_logic;
-	signal count_upR : std_logic;
-
-	-- Control Registers
-	signal current_color : std_logic_vector(23 downto 0) := x"FFFFFF"; -- Default White
-	signal pen_width     : integer range 1 to 3 := 1;
-	signal sketch_size   : std_logic := '0'; -- 0 for S1, 1 for S2
-
-	-- Buffer for typing (up to 16 chars)
-	type char_array is array (0 to 15) of std_logic_vector(7 downto 0);
-	signal cmd_buffer : char_array := (others => x"20"); 
-	signal buf_ptr    : integer range 0 to 15 := 0;
-
-	-- FSM for LCD/System Manager
-	type main_state_t is (BOOT_DELAY, SEND_READY, IDLE, TX_CHAR, CMD_PARSE);
-	signal main_state : main_state_t := BOOT_DELAY;
-	signal ready_str  : string(1 to 14) := "Hardware Ready";
-	signal str_ptr    : integer range 1 to 15 := 1;
+    signal direction         : std_logic_vector(3 downto 0); --Up, Down, Left, Right
+	signal count_enL         : std_logic;
+	signal count_upL         : std_logic;
+	signal count_enR         : std_logic;
+	signal count_upR         : std_logic;  
 
 --------------------------------------------------------------------------------------
 
@@ -252,7 +255,10 @@ Reset_Master   <= Reset_o or iReset;
 Reset_Master_n <= not Reset_Master;
 led0_g         <= ascii_new;
 led1_g         <= Reset_Master;
-lcd_data       <= '0' & ascii_code; 
+lcd_data       <= '0' & ascii_code;
+TX_Pulserator  <= ascii_new or not L or not R;
+led0_b         <= not R;
+led0_r         <= not L;  
 
 --led0_b         <= LCD_en;
 --rx_full        <= not rx_empty;
@@ -261,104 +267,76 @@ lcd_data       <= '0' & ascii_code;
     -- MIC Processes
     -- ==========================================
 
--- Drive the Onboard RGB LED with the current pen color
-led0_r <= '0' when current_color(23 downto 16) > x"7F" else '1'; -- Simple threshold for now
-led0_g <= '0' when current_color(15 downto 8)  > x"7F" else '1';
-led0_b <= '0' when current_color(7 downto 0)   > x"7F" else '1';
-
-LCD_MANAGER : process(iClk, Reset_Master)
-begin
-    if Reset_Master = '1' then
-        main_state <= BOOT_DELAY;
-        str_ptr <= 1;
-        buf_ptr <= 0;
-        lcd_en <= '0';
-    elsif rising_edge(iClk) then
-        lcd_en <= '0'; -- Default pulse
-
-        case main_state is
-            when BOOT_DELAY =>
-                if lcd_busy = '0' then main_state <= SEND_READY; end if;
-
-            when SEND_READY =>
-                if lcd_busy = '0' then
-                    lcd_rs   <= '1';
-                    lcd_data <= std_logic_vector(to_unsigned(character'pos(ready_str(str_ptr)), 8));
-                    lcd_en   <= '1';
-                    if str_ptr < 14 then str_ptr <= str_ptr + 1;
-                    else main_state <= IDLE; end if;
-                end if;
-
-            when IDLE =>
-                if ascii_new = '1' then
-                    if ascii_code = x"0D" then -- ENTER
-                        main_state <= CMD_PARSE;
-                    elsif ascii_code = x"08" then -- BACKSPACE
-                        if buf_ptr > 0 then buf_ptr <= buf_ptr - 1; end if;
-                        -- Add logic here to send "cursor back" command to LCD if desired
-                    else
-                        -- Store in buffer and echo to LCD
-                        cmd_buffer(buf_ptr) <= '0' & ascii_code;
-                        lcd_data <= '0' & ascii_code;
-                        lcd_rs   <= '1';
-                        lcd_en   <= '1';
-                        if buf_ptr < 15 then buf_ptr <= buf_ptr + 1; end if;
-                    end if;
-                end if;
-
-            when CMD_PARSE =>
-                -- Requirement: C[RRGGBB], W[1-3], S[1-2]
-                if cmd_buffer(0) = x"43" then -- 'C' for Color
-                    -- In a real app, you'd hex-decode cmd_buffer(1..6) here
-                    -- Simplified: Toggle to Red for demo
-                    current_color <= x"FF0000"; 
-                elsif cmd_buffer(0) = x"57" then -- 'W' for Width
-                    if cmd_buffer(1) = x"31" then pen_width <= 1;
-                    elsif cmd_buffer(1) = x"32" then pen_width <= 2;
-                    elsif cmd_buffer(1) = x"33" then pen_width <= 3; end if;
-                elsif cmd_buffer(0) = x"53" then -- 'S' for Size
-                    if cmd_buffer(1) = x"31" then sketch_size <= '0';
-                    elsif cmd_buffer(1) = x"32" then sketch_size <= '1'; end if;
-                end if;
-                
-                buf_ptr <= 0; -- Reset buffer for next word
-                main_state <= IDLE;
-                
-            when others => main_state <= IDLE;
-        end case;
-    end if;
-end process;
-
-
 tx_pulse_process : process(tx_clk)
 	begin
 		if (rising_edge(tx_clk)) then
-			btn_sync(0) <= ascii_new;
+			btn_sync(0) <= TX_Pulserator;
 			btn_sync(1) <= btn_sync(0);
 			ld_tx_pulse   <= not btn_sync(1) and btn_sync(0);	
 		end if;
 	end process;
 	
+--	direction(3) <= count_upR;
+--	direction(2) <= count_enR;
+--	direction(1) <= count_upL;
+--	direction(0) <= count_enL;
+--	ascii_code8 <= "0000" & direction;
+	
 Pmod_LED_direction_TEST : process(iClk)
     begin
         Pmod_LEDS <= "0000";
-        if count_enL = '1' then 
-            if count_upL = '0' then
-                Pmod_LEDS(0) <= '1';
-            else
-                Pmod_LEDS(1) <= '1';
-            end if; 
-        end if;
-        
-        if count_enR = '1' then 
-            if count_upR = '0' then
-                Pmod_LEDS(2) <= '1';
-            else
-                Pmod_LEDS(3) <= '1';
-            end if; 
-        end if;
-         
+        if rising_edge(iClk) then
+            if count_enL = '1' then 
+                if count_upL = '0' then
+                    Pmod_LEDS(0) <= '1';
+                    Pmod_LEDS(1) <= '0';
+                    direction(0) <= '1';
+                    direction(1) <= '0';
+                elsif count_upL = '1' then
+                    Pmod_LEDS(0) <= '0';
+                    Pmod_LEDS(1) <= '1';
+                    direction(0) <= '1';
+                    direction(1) <= '1';
+                end if; 
+            end if;
+       
+            if count_enR = '1' then 
+                if count_upR = '0' then
+                    Pmod_LEDS(2) <= '1';
+                    Pmod_LEDS(3) <= '0';
+                    direction(2) <= '1';
+                    direction(3) <= '0';
+                elsif count_upR = '1' then
+                    Pmod_LEDS(2) <= '0';
+                    Pmod_LEDS(3) <= '1';
+                    direction(2) <= '1';
+                    direction(3) <= '1';
+                end if; 
+            end if;
+        end if;         
     end process;
+    
+Rotary_Directulator : process(iClk)
+	begin
+		--case direction is
+--            when direction(0 downto 1) = "10" then
+--                lcd_data <= '0' & x"77"
+--            end if;  
+--		end case;
+        if rising_edge(iClk) then
+            if direction(1 downto 0) = "11" then 
+                ascii_code8 <= x"77";
+            elsif direction(1 downto 0) = "01" then
+                ascii_code8 <= x"73";
+            elsif direction(3 downto 2) = "11" then
+                ascii_code8 <= x"61";
+            elsif direction(3 downto 2) = "01" then
+                ascii_code8 <= x"64";
+            else
+                ascii_code8 <= (others => '0');
+            end if;
+        end if;
+	end process;
 
     -- ==========================================
     -- Port Maping
@@ -420,11 +398,43 @@ inst_Rotary_EncoderR: RotaryEN_SM --Left, Right
   Port map(
     reset    => Reset_Master,
 	clk      => iClk,
-	A        => L,
-	B        => L_CLK,
+	A        => R,
+	B        => R_CLK,
 	count_en => count_enR,
 	count_up => count_upR
   );
+
+-------------------------------------------------------------------------------------------------
+
+inst_UNIV_CNT_L: univ_bin_counter
+   port map(
+			clk      => iClk, 
+			reset    => Reset_Master,
+			syn_clr  => '0', 
+			load     => '0', 
+			en       => count_enL, 
+			up	     => count_upL,
+			clk_en   => open, 			
+			d        => (others => '0'),						      
+			max_tick => open, 
+			min_tick => open,		
+			q        =>	position_Y					      		
+   );
+   
+  inst_UNIV_CNT_R: univ_bin_counter
+   port map(
+			clk      => iClk, 
+			reset    => Reset_Master,
+			syn_clr  => '0', 
+			load     => '0', 
+			en       => count_enR, 
+			up	     => count_upR,
+			clk_en   => open, 			
+			d        => (others => '0'),						      
+			max_tick => open, 
+			min_tick => open,		
+			q        =>	position_Y					      		
+   );
 
 -------------------------------------------------------------------------------------------------
 
@@ -462,7 +472,7 @@ inst_uart : entity work.uart
             reset           =>   Reset_Master,
             txclk           =>   TX_Clk,
             ld_tx_data      =>   ld_tx_pulse,
-            tx_data         =>   lcd_data,--ascii_code8,
+            tx_data         =>   lcd_data,   --ascii_code8,
             tx_enable       =>   '1',
             tx_out          =>   UART_TX,    --The Pin to TX
             tx_empty        =>   open,
