@@ -169,20 +169,6 @@ end component;
 
 -------------------------------------------------------------------------------------------------
 
-component clockdiv is
-    generic(
-        INTERNAL_clk : integer := 125; --IN MHz
-        divider      : integer := 5 
-    );
-    Port(
-        CLK     : in std_logic;
-        RESET   : in std_logic;
-        CLK_div : out std_logic
-    );
-end component;
-
--------------------------------------------------------------------------------------------------
-
 component uart is
         Port (
             reset       :in  std_logic;
@@ -228,7 +214,6 @@ component uart is
     signal RX_Clk            : std_logic;
     signal rx_data           : std_logic_Vector(7 downto 0);
     signal btn_sync          : std_logic_vector(1 downto 0);
-    signal tx_empty          : std_logic; 
     --LCD Signals
     signal lcd_rs 			: std_logic;
 	signal lcd_en			: std_logic;
@@ -246,8 +231,8 @@ component uart is
 	signal count_upR : std_logic;
 
 	-- Control Registers
-	signal current_color : std_logic_vector(23 downto 0) := x"000000"; -- Default Black
-	signal pen_width     : std_logic_vector(1 downto 0) := "01";
+	signal current_color : std_logic_vector(23 downto 0) := x"00000000"; -- Default Black
+	signal pen_width     : std_logic_vector(1 downto 0) := 1;
 	signal sketch_size   : std_logic := '0'; -- 0 for S1, 1 for S2
 
 	-- Buffer for typing (up to 16 chars)
@@ -268,9 +253,6 @@ component uart is
     
     	-- Internal registers for parsed values
     	signal hex_val : unsigned(3 downto 0); -- temporary for decoding
-    	
-   --VGA
-   signal Clk_Div_25Mhz : std_logic; 
 
 
 --------------------------------------------------------------------------------------
@@ -299,21 +281,80 @@ led0_g <= '0' when current_color(15 downto 8)  > x"7F" else '1';
 led0_b <= '0' when current_color(7 downto 0)   > x"7F" else '1';
 
 -- ==========================================
--- 2. System Manager: Keyboard -> LCD/UART/Internal State
+-- 2. UART Manager: Keyboard -> UART
 -- ==========================================
-SYSTEM_MANAGER : process(iClk, Reset_Master)
+UART_MANAGER : process(iClk, Reset_Master)
+begin
+	if Reset_Master = '1' then
+        ld_tx_pulse <= '0';
+        tx_data <= (others => '0');
+        tx_fsm <= TX_IDLE;
+    elsif rising_edge(iClk) then
+        ld_tx_pulse <= '0'; -- Default to no pulse
+
+        case tx_fsm is
+			when TX_IDLE =>
+                if tx_empty = '1' then
+                    -- 1. Priority: Rotary Encoders (Immediate)
+                    if count_enR = '1' then
+                        ld_tx_pulse <= '1';
+                        if count_upR = '1' then tx_data <= x"52"; -- 'R'
+                        else tx_data <= x"4C"; end if;           -- 'L'
+                    elsif count_enL = '1' then
+                        ld_tx_pulse <= '1';
+                        if count_upL = '1' then tx_data <= x"55"; -- 'U'
+                        else tx_data <= x"44"; end if;           -- 'D'
+					elsif main_state = CMD_PARSE then
+						tx_fsm <= TX_START;
+					end if;
+				end if;
+				ld_tx_pulse <= '0'; -- Explicitly clear the load signal
+                main_state <= UPDATE_STATUS; -- Return to the main system flow
+			when TX_START =>
+            	tx_data <= cmd_buffer(0); -- Send the Tag (#, W, or S)
+                ld_tx_pulse <= '1';
+                tx_fsm <= TX_WAIT1;
+
+			when TX_WAIT1 => tx_fsm <= TX_BYTE1;
+
+            when TX_BYTE1 =>
+                tx_data <= cmd_buffer(1); -- Send the Value
+                ld_tx_pulse <= '1';
+			    if cmd_buffer(0) = x"23" then
+					tx_fsm <= TX_WAIT2;
+			    else 
+					tx_fsm <= TX_IDLE;
+			    end if;
+
+			when TX_WAIT2 => tx_fsm <= TX_BYTE2;
+
+    		when TX_BYTE2 =>
+        		tx_data <= cmd_buffer(2); -- Send Green
+        		ld_tx_pulse <= '1';
+        		tx_fsm <= TX_WAIT3;
+
+			when TX_WAIT3 => tx_fsm <= TX_BYTE3;
+
+    		when TX_BYTE3 =>
+        		tx_data <= cmd_buffer(3); -- Send Blue
+        		ld_tx_pulse <= '1';
+			    tx_fsm <= TX_IDLE;
+
+			when others => tx_fsm <= TX_IDLE;
+		end case;
+	
+-- ==========================================
+-- 2. LCD Manager: Keyboard -> LCD
+-- ==========================================
+LCD_MANAGER : process(iClk, Reset_Master)
 begin
     if Reset_Master = '1' then
         main_state <= BOOT_DELAY;
         str_ptr <= 1;
         buf_ptr <= 0;
         lcd_en <= '0';
-        ld_tx_pulse <= '0';
     elsif rising_edge(iClk) then
-        lcd_en <= '0'; 
-        ld_tx_pulse <= '0';
-
-        
+        lcd_en <= '0';         
 
         case main_state is
             when BOOT_DELAY =>
@@ -330,27 +371,15 @@ begin
                 end if;
 
             when IDLE =>
-		-- Monitor Encoders for Movement Tags (Priority over typing)
-        	if (count_enR = '1' or count_enL = '1') and tx_empty = '1' then
-				if count_enR = '1' then
-            		ld_tx_pulse <= '1';
-            		if count_upR = '1' then tx_data <= x"52"; -- 'R'
-            		else tx_data <= x"4C"; end if;           -- 'L'
-        		elsif count_enL = '1' then
-            		ld_tx_pulse <= '1';
-            		if count_upL = '1' then tx_data <= x"55"; -- 'U'
-            		else tx_data <= x"44"; end if;           -- 'D'
-        		end if;
-			end if;
 
                 if ascii_new = '1' then
                     if ascii_code = x"0D" then -- ENTER
                         main_state <= CMD_PARSE;
                     elsif ascii_code = x"08" then -- BACKSPACE
                         if buf_ptr > 0 then 
-			    buf_ptr <= buf_ptr - 1;
-			    main_state <= LCD_BS_STEP1; 
-			end if;
+			    			buf_ptr <= buf_ptr - 1;
+			    			main_state <= LCD_BS_STEP1; 
+						end if;
                     else
                         -- Echo to LCD and Buffer
                         cmd_buffer(buf_ptr) <= '0' & ascii_code;
@@ -378,25 +407,21 @@ begin
 		    		else current_color(7 downto 0) <= x"00";
 		    		end if;
 
-                    main_state <= TX_CHAR; -- Go to multi-byte UART sender
                     tx_fsm <= TX_START; 
 
                 -- Width Change: W[1-3] -> Tag 'W'
                 elsif cmd_buffer(0) = x"57" then
                     pen_width <= cmd_buffer(1)(1 downto 0);
-                    main_state <= TX_CHAR;
                     tx_fsm <= TX_START;
 
                 -- Size Change: S[1-2] -> Tag 'S'
                 elsif cmd_buffer(0) = x"53" then
                     sketch_size <= cmd_buffer(1)(0);
-                    main_state <= TX_CHAR;
                     tx_fsm <= TX_START;
                 end if;
                 
                 buf_ptr <= 0;
-                if main_state = TX_CHAR then 
-				else main_state <= UPDATE_STATUS; end if;
+				main_state <= UPDATE_STATUS;
 
 		-- S: Size, C: Color (Hex), W: Width
 			when UPDATE_STATUS =>
@@ -448,67 +473,25 @@ begin
         			status_ptr <= status_ptr + 1;
     			end if;
 
-	    when LCD_BS_STEP1 =>
+	    	when LCD_BS_STEP1 =>
                 if lcd_busy = '0' then
                     lcd_rs <= '0'; lcd_data <= x"10"; -- Shift Left
                     lcd_en <= '1'; main_state <= LCD_BS_STEP2;
                 end if;
 
-        when LCD_BS_STEP2 =>
+       	 	when LCD_BS_STEP2 =>
                 if lcd_busy = '0' then
                     lcd_rs <= '1'; lcd_data <= x"20"; -- Print Space
                     lcd_en <= '1'; main_state <= LCD_BS_STEP3;
                 end if;
 
-        when LCD_BS_STEP3 =>
+        	when LCD_BS_STEP3 =>
                 if lcd_busy = '0' then
                     lcd_rs <= '0'; lcd_data <= x"10"; -- Shift Left again
                     lcd_en <= '1'; main_state <= IDLE;
                 end if;
 
-        when TX_CHAR =>
-                -- Multi-byte UART Logic for Width/Size/Color
-		if tx_empty = '1' then
-                    case tx_fsm is
-	
-			when TX_START =>
-                    	    tx_data <= cmd_buffer(0); -- Send the Tag (#, W, or S)
-                    	    ld_tx_pulse <= '1';
-                	    tx_fsm <= TX_WAIT1;
-
-			when TX_WAIT1 => tx_fsm <= TX_BYTE1;
-
-                	when TX_BYTE1 =>
-                	    tx_data <= cmd_buffer(1); -- Send the Value
-                	    ld_tx_pulse <= '1';
-			    if cmd_buffer(0) = x"23" then
-				tx_fsm <= TX_WAIT2;
-			    else 
-				tx_fsm <= TX_IDLE;
-			    end if;
-
-			when TX_WAIT2 => tx_fsm <= TX_BYTE2;
-
-    			when TX_BYTE2 =>
-        		    tx_data <= cmd_buffer(2); -- Send Green
-        		    ld_tx_pulse <= '1';
-        		    tx_fsm <= TX_WAIT3;
-
-			when TX_WAIT3 => tx_fsm <= TX_BYTE3;
-
-    			when TX_BYTE3 =>
-        		    tx_data <= cmd_buffer(3); -- Send Blue
-        		    ld_tx_pulse <= '1';
-			    tx_fsm <= TX_IDLE;
-
-			when TX_IDLE =>
-                	    ld_tx_pulse <= '0'; -- Explicitly clear the load signal
-                	    main_state <= UPDATE_STATUS; -- Return to the main system flow
-
-			when others => tx_fsm <= TX_IDLE;
-		    end case;
-		end if;
-            when others => main_state <= IDLE;
+        	when others => main_state <= IDLE;
         end case;
     end if;
 end process;
@@ -642,20 +625,7 @@ inst_ps2_keyboard_to_ascii : ps2_keyboard_to_ascii
             ascii_code   => ascii_code
         );
    
--------------------------------------------------------------------------------------------------
- 
-inst_VGA_25MHz_Div : clockdiv
-    generic map(
-        INTERNAL_clk => 125, --IN MHz
-        divider      => 5 
-    )
-    Port map(
-        CLK          => iClk,
-        RESET        => Reset_Master,
-        CLK_div      => Clk_Div_25Mhz
-    );
-
--------------------------------------------------------------------------------------------------
+ -------------------------------------------------------------------------------------------------
  
  inst_CLK_div_Uart : entity work.clock_div
   generic map(
