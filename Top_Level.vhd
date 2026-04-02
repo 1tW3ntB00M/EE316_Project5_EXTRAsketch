@@ -239,9 +239,10 @@ component uart is
 	type char_array is array (0 to 15) of std_logic_vector(7 downto 0);
 	signal cmd_buffer : char_array := (others => x"20"); 
 	signal buf_ptr    : integer range 0 to 15 := 0;
+	signal status_ptr    : integer range 0 to 17 := 0;
 
 	-- FSM for LCD/System Manager
-	type main_state_t is (BOOT_DELAY, SEND_READY, IDLE, TX_CHAR, CMD_PARSE);
+	type main_state_t is (BOOT_DELAY, SEND_READY, IDLE, TX_CHAR, CMD_PARSE, UPDATE_STATUS, LCD_BS_STEP1, LCD_BS_STEP2, LCD_BS_STEP3);
 	signal main_state : main_state_t := BOOT_DELAY;
 	signal ready_str  : string(1 to 14) := "Hardware Ready";
 	signal str_ptr    : integer range 1 to 15 := 1;
@@ -346,18 +347,18 @@ begin
                 -- Color Change: #[RRGGBB] -> Tag '#'
                 if cmd_buffer(0) = x"23" then 
                     -- Basic parsing: only first 2 chars for brevity, add others as needed
-		    if cmd_buffer(1) = x"66" and cmd_buffer(2) = x"66" then
-                	current_color(23 downto 16) <= x"FF";
-		    else current_color(23 downto 16) <= x"00";
-		    end if;
-		    if cmd_buffer(3) = x"66" and cmd_buffer(4) = x"66" then
-                	current_color(15 downto 8) <= x"FF";
-		    else current_color(15 downto 8) <= x"00";
-		    end if;
-		    if cmd_buffer(5) = x"66" and cmd_buffer(6) = x"66" then
-                	current_color(7 downto 0) <= x"FF";
-		    else current_color(7 downto 0) <= x"00";
-		    end if;
+		    		if cmd_buffer(1) = x"66" and cmd_buffer(2) = x"66" then
+                		current_color(23 downto 16) <= x"FF";
+		    		else current_color(23 downto 16) <= x"00";
+		    		end if;
+		    		if cmd_buffer(3) = x"66" and cmd_buffer(4) = x"66" then
+                		current_color(15 downto 8) <= x"FF";
+		    		else current_color(15 downto 8) <= x"00";
+		    		end if;
+		    		if cmd_buffer(5) = x"66" and cmd_buffer(6) = x"66" then
+                		current_color(7 downto 0) <= x"FF";
+		    		else current_color(7 downto 0) <= x"00";
+		    		end if;
 
                     main_state <= TX_CHAR; -- Go to multi-byte UART sender
                     tx_fsm <= TX_START; 
@@ -376,7 +377,58 @@ begin
                 end if;
                 
                 buf_ptr <= 0;
-                if main_state /= TX_CHAR then main_state <= IDLE; end if;
+                if main_state = TX_CHAR then 
+				else main_state <= UPDATE_STATUS; end if;
+
+		-- S: Size, C: Color (Hex), W: Width
+			when UPDATE_STATUS =>
+    			if lcd_busy = '0' then
+        			case status_ptr is
+            			when 0 => lcd_rs <= '0'; lcd_data <= x"C0"; -- Jump to Row 2
+           				when 1 => lcd_rs <= '1'; lcd_data <= x"53"; -- 'S'
+						when 2 => lcd_rs <= '1'; lcd_data <= x"3A"; -- ':'
+            			when 3 => lcd_rs <= '1'; lcd_data <= x"30" or ("0000000" & sketch_size); -- '1' or '2'
+            			when 4 => lcd_rs <= '1'; lcd_data <= x"20"; -- space
+            			when 5 => lcd_rs <= '1'; lcd_data <= x"43"; -- 'C'
+            			when 6 => lcd_rs <= '1'; lcd_data <= x"3A"; -- ':'
+						when 7 => lcd_rs <= '1'; 
+							if current_color(23 downto 20) = x"F" then 
+								lcd_data <= x"46";
+							else lcd_data <= x"30"; end if;
+						when 8 => lcd_rs <= '1'; 
+							if current_color(19 downto 16) = x"F" then 
+								lcd_data <= x"46";
+							else lcd_data <= x"30"; end if;
+						when 9 => lcd_rs <= '1'; 
+							if current_color(15 downto 12) = x"F" then 
+								lcd_data <= x"46";
+							else lcd_data <= x"30"; end if;
+						when 10 => lcd_rs <= '1'; 
+							if current_color(11 downto 8) = x"F" then 
+								lcd_data <= x"46";
+							else lcd_data <= x"30"; end if;
+						when 11 => lcd_rs <= '1'; 
+							if current_color(7 downto 4) = x"F" then 
+								lcd_data <= x"46";
+							else lcd_data <= x"30"; end if;
+						when 12 => lcd_rs <= '1'; 
+							if current_color(3 downto 0) = x"F" then 
+								lcd_data <= x"46";
+							else lcd_data <= x"30"; end if;
+            			when 13 => lcd_rs <= '1'; lcd_data <= x"20"; -- space
+            			when 14 => lcd_rs <= '1'; lcd_data <= x"57"; -- 'W'
+						when 15 => lcd_rs <= '1'; lcd_data <= x"3A"; -- ':'
+            			when 16 => lcd_rs <= '1'; lcd_data <= x"30" or ("000000" & pen_width); -- Width '1', '2', or '3'
+           				when 17 => 
+                			lcd_rs <= '0'; 
+							lcd_data <= std_logic_vector(to_unsigned(128 + buf_ptr, 8)); -- Jump back to Row 1 for typing
+                			main_state <= IDLE;
+							status_ptr <= 0;
+            			when others => null;
+        			end case;
+        			lcd_en <= '1';
+        			status_ptr <= status_ptr + 1;
+    			end if;
 
 	    when LCD_BS_STEP1 =>
                 if lcd_busy = '0' then
@@ -384,19 +436,19 @@ begin
                     lcd_en <= '1'; main_state <= LCD_BS_STEP2;
                 end if;
 
-            when LCD_BS_STEP2 =>
+        when LCD_BS_STEP2 =>
                 if lcd_busy = '0' then
                     lcd_rs <= '1'; lcd_data <= x"20"; -- Print Space
                     lcd_en <= '1'; main_state <= LCD_BS_STEP3;
                 end if;
 
-            when LCD_BS_STEP3 =>
+        when LCD_BS_STEP3 =>
                 if lcd_busy = '0' then
                     lcd_rs <= '0'; lcd_data <= x"10"; -- Shift Left again
                     lcd_en <= '1'; main_state <= IDLE;
                 end if;
 
-            when TX_CHAR =>
+        when TX_CHAR =>
                 -- Multi-byte UART Logic for Width/Size/Color
 		if tx_empty = '1' then
                     case tx_fsm is
@@ -433,7 +485,7 @@ begin
 
 			when TX_IDLE =>
                 	    ld_tx_pulse <= '0'; -- Explicitly clear the load signal
-                	    main_state <= IDLE; -- Return to the main system flow
+                	    main_state <= UPDATE_STATUS; -- Return to the main system flow
 
 			when others => tx_fsm <= TX_IDLE;
 		    end case;
