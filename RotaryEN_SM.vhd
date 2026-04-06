@@ -32,19 +32,27 @@ use IEEE.NUMERIC_STD.ALL;
 --use UNISIM.VComponents.all;
 
 entity RotaryEN_SM is
-  Port (
-    reset    : IN std_logic;
-	clk      : IN std_logic;
-	A        : IN std_logic;
-	B        : IN std_logic;
-	count_en : OUT std_logic;
-	count_up : OUT std_logic
+  generic(
+    size : integer := 255;
+    vector_size : integer := 8
   );
+  Port (
+        reset: IN std_logic;
+		clk: IN std_logic;
+		A: IN std_logic;
+		B: IN std_logic;
+		count_in: IN std_logic_vector(vector_size-1 downto 0); -- Corrected input
+		max_cars: OUT std_logic; -- Corrected output
+		min_cars: OUT std_logic; -- Corrected output
+		count_en : OUT std_logic;
+		count_up : OUT std_logic;
+		full_lot: OUT std_logic
+	);
 end RotaryEN_SM;
 
 architecture Behavioral of RotaryEN_SM is
 
-type State_type is (INIT, L1, L2, L3, SUB, R1, R2, R3, ADD);
+	type State_type is (INIT, L1, L2, L3, SUB, R1, R2, R3, ADD);
 	signal CS : state_type; -- current state
 	signal AB : std_logic_vector (1 downto 0);
 
@@ -122,31 +130,50 @@ begin
 			end case;
 		end if;
 	end process;
-	
+
 	-- Assign outputs based on the current state (Moore-style FSM)
-	output_logic : process(CS)
+	output_logic : process(CS, count_in)
 	begin
 		-- Default values for safety
 		count_en <= '0';
 		count_up <= '0';
+		full_lot <= '0';
+		max_cars <= '0';
+		min_cars <= '0';
 
 		case CS is
 			when INIT =>
+				full_lot <= '0';
 				count_en <= '0';
 				count_up <= '0';
 			when SUB =>
---				if unsigned(count_in) > 0 then
+				if unsigned(count_in) > 0 then
 					count_en <= '1';
 					count_up <= '0';
---				end if;
+				end if;
 			when ADD =>
---				if unsigned(count_in) < 256 then
+				if unsigned(count_in) < size then
 					count_en <= '1';
 					count_up <= '1';
---				end if;
+				end if;
 			when others =>
 				null;
 		end case;
+
+		-- Logic to set max/min car flags for the counter
+		if unsigned(count_in) = 25 then
+			full_lot <= '1';
+			max_cars <= '1';
+		else
+			full_lot <= '0';
+			max_cars <= '0';
+		end if;
+		
+		if unsigned(count_in) = 0 then
+			min_cars <= '1';
+		else
+			min_cars <= '0';
+		end if;
 
 	end process;
 
