@@ -82,10 +82,11 @@ begin
                     i2c_ena <= '1'; state <= TRANSMIT;
 
                 when CLIENT_LOAD => -- Pulse EN high-low for high then low nibbles
-                    i2c_cmds(0).data <= data_in(7 downto 4) & '1' & '1' & '0' & rs; -- EN=1
-                    i2c_cmds(1).data <= data_in(7 downto 4) & '1' & '0' & '0' & rs; -- EN=0
-                    i2c_cmds(2).data <= data_in(3 downto 0) & '1' & '1' & '0' & rs; -- EN=1
-                    i2c_cmds(3).data <= data_in(3 downto 0) & '1' & '0' & '0' & rs; -- EN=0
+                    -- Mapping: P7-P4=Data, P3=Backlight(1), P2=EN, P1=RW(0), P0=RS
+                    i2c_cmds(0).data <= data_in(7 downto 4) & '1' & '1' & '0' & rs; -- High nibble, EN=1
+                    i2c_cmds(1).data <= data_in(7 downto 4) & '1' & '0' & '0' & rs; -- High nibble, EN=0
+                    i2c_cmds(2).data <= data_in(3 downto 0) & '1' & '1' & '0' & rs; -- Low nibble, EN=1
+                    i2c_cmds(3).data <= data_in(3 downto 0) & '1' & '0' & '0' & rs; -- Low nibble, EN=0
                     i2c_cmd_len <= 4;
                     i2c_ena <= '1'; state <= TRANSMIT;
 
