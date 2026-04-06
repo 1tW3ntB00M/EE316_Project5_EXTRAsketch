@@ -32,8 +32,8 @@ use IEEE.STD_LOGIC_1164.ALL;
 --use UNISIM.VComponents.all;
 
 package i2c_utilities is
-    constant NUM_DRIVERS : integer := 2; -- number of drivers sharing this bus 
-    constant MAX_CMDS : integer := 8; -- max bytes (read and write combined) per transaction
+    constant NUM_DRIVERS : integer := 3; -- number of drivers sharing this bus 
+    constant MAX_CMDS : integer := 12; -- max bytes (read and write combined) per transaction
     
     type i2c_cmd_t is record -- represents one byte over I2C
         rw   : std_logic; -- 0 for write, 1 for read, can change throughout transaction w/ repeated start
