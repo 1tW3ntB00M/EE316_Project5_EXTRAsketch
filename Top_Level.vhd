@@ -256,6 +256,15 @@ component uart is
     	signal hex_val : unsigned(3 downto 0); -- temporary for decoding
 
 
+
+function ascii_to_hex(char : std_logic_vector(7 downto 0)) return std_logic_vector is
+begin
+    if char >= x"30" and char <= x"39" then return char(3 downto 0); -- 0-9
+    elsif char >= x"41" and char <= x"46" then return std_logic_vector(unsigned(char(3 downto 0)) + 9); -- A-F
+    elsif char >= x"61" and char <= x"66" then return std_logic_vector(unsigned(char(3 downto 0)) + 9); -- a-f
+    else return x"0"; end if;
+end function;
+
 --------------------------------------------------------------------------------------
 
 begin
@@ -285,65 +294,44 @@ led0_b <= '0' when current_color(7 downto 0)   > x"7F" else '1';
 -- 2. UART Manager: Keyboard -> UART
 -- ==========================================
 UART_MANAGER : process(iClk, Reset_Master)
+    variable pulse_cnt : integer range 0 to 255 := 0;
 begin
-	if Reset_Master = '1' then
+    if Reset_Master = '1' then
+        uart_fsm <= UART_IDLE;
         ld_tx_pulse <= '0';
-        tx_data <= (others => '0');
-        tx_fsm <= TX_IDLE;
+        pulse_cnt := 0;
     elsif rising_edge(iClk) then
-        ld_tx_pulse <= '0'; -- Default to no pulse
+        ld_tx_pulse <= '0'; -- Default
 
-        case tx_fsm is
-			when TX_IDLE =>
-                if tx_empty = '1' then
-                    -- 1. Priority: Rotary Encoders (Immediate)
-                    if count_enR = '1' then
-                        ld_tx_pulse <= '1';
-                        if count_upR = '1' then tx_data <= x"52"; -- 'R'
-                        else tx_data <= x"4C"; end if;           -- 'L'
-                    elsif count_enL = '1' then
-                        ld_tx_pulse <= '1';
-                        if count_upL = '1' then tx_data <= x"55"; -- 'U'
-                        else tx_data <= x"44"; end if;           -- 'D'
-					elsif main_state = CMD_PARSE then
-						tx_fsm <= TX_START;
-					end if;
-				end if;
-				ld_tx_pulse <= '0'; -- Explicitly clear the load signal
-			when TX_START =>
-            	tx_data <= cmd_buffer(0); -- Send the Tag (#, W, or S)
-                ld_tx_pulse <= '1';
-                tx_fsm <= TX_WAIT1;
+        case uart_fsm is
+            when UART_IDLE =>
+                if uart_trigger = '1' and tx_empty = '1' then
+                    tx_data  <= uart_val_to_send;
+                    uart_fsm <= UART_LOAD;
+                end if;
 
-			when TX_WAIT1 => tx_fsm <= TX_BYTE1;
+            when UART_LOAD =>
+                ld_tx_pulse <= '1'; -- Hold high for UART to see
+                if pulse_cnt < 50 then 
+                    pulse_cnt := pulse_cnt + 1;
+                else
+                    pulse_cnt := 0;
+                    uart_fsm <= UART_WAIT_BUSY;
+                end if;
 
-            when TX_BYTE1 =>
-                tx_data <= cmd_buffer(1); -- Send the Value
-                ld_tx_pulse <= '1';
-			    if cmd_buffer(0) = x"23" then
-					tx_fsm <= TX_WAIT2;
-			    else 
-					tx_fsm <= TX_IDLE;
-			    end if;
+            when UART_WAIT_BUSY =>
+                if tx_empty = '0' then -- UART has started sending
+                    uart_fsm <= UART_WAIT_EMPTY;
+                end if;
 
-			when TX_WAIT2 => tx_fsm <= TX_BYTE2;
-
-    		when TX_BYTE2 =>
-        		tx_data <= cmd_buffer(2); -- Send Green
-        		ld_tx_pulse <= '1';
-        		tx_fsm <= TX_WAIT3;
-
-			when TX_WAIT3 => tx_fsm <= TX_BYTE3;
-
-    		when TX_BYTE3 =>
-        		tx_data <= cmd_buffer(3); -- Send Blue
-        		ld_tx_pulse <= '1';
-			    tx_fsm <= TX_IDLE;
-
-			when others => tx_fsm <= TX_IDLE;
-		end case;
-	end if;
+            when UART_WAIT_EMPTY =>
+                if tx_empty = '1' then -- UART is finished
+                    uart_fsm <= UART_IDLE;
+                end if;
+        end case;
+    end if;
 end process;
+
 	
 -- ==========================================
 -- 2. LCD Manager: Keyboard -> LCD
@@ -351,156 +339,115 @@ end process;
 LCD_MANAGER : process(iClk, Reset_Master)
 begin
     if Reset_Master = '1' then
-        main_state <= BOOT_DELAY;
-        str_ptr <= 1;
-        buf_ptr <= 0;
+        lcd_fsm <= LCD_IDLE;
         lcd_en <= '0';
     elsif rising_edge(iClk) then
-        lcd_en <= '0';         
+        lcd_en <= '0'; -- Pulse only
 
-        case main_state is
-            when BOOT_DELAY =>
-                if lcd_busy = '0' then main_state <= SEND_READY; end if;
-
-            when SEND_READY =>
-                if lcd_busy = '0' then
-                    lcd_rs   <= '1';
-                    lcd_data <= std_logic_vector(to_unsigned(character'pos(ready_str(str_ptr)), 8));
-                    lcd_en   <= '1';
-                    if str_ptr < 14 then str_ptr <= str_ptr + 1;
-                    else main_state <= IDLE; end if;
+        case lcd_fsm is
+            when LCD_IDLE =>
+                if lcd_print_req = '1' and lcd_busy = '0' then
+                    lcd_data <= char_to_lcd;
+                    lcd_rs <= '1'; -- Data Mode
+                    lcd_en <= '1';
+                    lcd_fsm <= LCD_WAIT;
+                elsif lcd_bs_req = '1' and lcd_busy = '0' then
+                    lcd_data <= x"10"; -- Shift Cursor Left command
+                    lcd_rs <= '0'; -- Command Mode
+                    lcd_en <= '1';
+                    lcd_fsm <= LCD_BS_STEP2;
                 end if;
 
-            when IDLE =>
+            when LCD_BS_STEP2 => -- Print space to "erase"
+                if lcd_busy = '0' then
+                    lcd_data <= x"20"; -- Space char
+                    lcd_rs <= '1';
+                    lcd_en <= '1';
+                    lcd_fsm <= LCD_BS_STEP3;
+                end if;
 
-                if ascii_new = '1' then
-                    if ascii_code = x"0D" then -- ENTER
-                        main_state <= CMD_PARSE;
+            when LCD_BS_STEP3 => -- Shift Left again to reset cursor
+                if lcd_busy = '0' then
+                    lcd_data <= x"10";
+                    lcd_rs <= '0';
+                    lcd_en <= '1';
+                    lcd_fsm <= LCD_WAIT;
+                end if;
+
+            when LCD_WAIT =>
+                if lcd_busy = '0' then lcd_fsm <= LCD_IDLE; end if;
+        end case;
+    end if;
+end process;
+
+-- ==========================================
+-- 3. System Manager:
+-- ==========================================
+SYSTEM_MANAGER : process(iClk, Reset_Master)
+begin
+    if Reset_Master = '1' then
+        main_state <= BOOT;
+        buf_ptr <= 0;
+    elsif rising_edge(iClk) then
+        uart_trigger <= '0';
+        lcd_print_req <= '0';
+        lcd_bs_req <= '0';
+
+        case main_state is
+            when BOOT =>
+                -- Logic to send "Hardware Ready" string
+                main_state <= RUN;
+
+            when RUN =>
+                -- PRIORITY 1: Rotary Encoders (Instant UART)
+                if (count_enR = '1' or count_enL = '1') and uart_fsm = UART_IDLE then
+                    uart_trigger <= '1';
+                    if count_enR = '1' then
+                        uart_val_to_send <= x"52" when count_upR = '1' else x"4C"; -- R/L
+                    elsif count_enL = '1' then
+                        uart_val_to_send <= x"55" when count_upL = '1' else x"44"; -- U/D
+                    end if;
+
+                -- PRIORITY 2: Keyboard Input
+                elsif ascii_new = '1' then
+                    if ascii_code = x"0D" then -- ENTER: Send Buffer to PC
+                        main_state <= SEND_BUFFER;
+                        buf_idx <= 0;
                     elsif ascii_code = x"08" then -- BACKSPACE
-                        if buf_ptr > 0 then 
-			    			buf_ptr <= buf_ptr - 1;
-			    			main_state <= LCD_BS_STEP1; 
-						end if;
-                    else
-                        -- Echo to LCD and Buffer
+                        if buf_ptr > 0 then
+                            buf_ptr <= buf_ptr - 1;
+                            lcd_bs_req <= '1';
+                        end if;
+                    else -- Regular Char: Echo to LCD & Save
+                        char_to_lcd <= '0' & ascii_code;
+                        lcd_print_req <= '1';
                         cmd_buffer(buf_ptr) <= '0' & ascii_code;
-                        lcd_data <= '0' & ascii_code;
-                        lcd_rs   <= '1';
-                        lcd_en   <= '1';
                         if buf_ptr < 15 then buf_ptr <= buf_ptr + 1; end if;
                     end if;
                 end if;
 
-            when CMD_PARSE =>
-                -- Color Change: #[RRGGBB] -> Tag '#'
-                if cmd_buffer(0) = x"23" then 
-                    -- Basic parsing: only first 2 chars for brevity, add others as needed
-		    		if cmd_buffer(1) = x"66" and cmd_buffer(2) = x"66" then
-                		current_color(23 downto 16) <= x"FF";
-		    		else current_color(23 downto 16) <= x"00";
-		    		end if;
-		    		if cmd_buffer(3) = x"66" and cmd_buffer(4) = x"66" then
-                		current_color(15 downto 8) <= x"FF";
-		    		else current_color(15 downto 8) <= x"00";
-		    		end if;
-		    		if cmd_buffer(5) = x"66" and cmd_buffer(6) = x"66" then
-                		current_color(7 downto 0) <= x"FF";
-		    		else current_color(7 downto 0) <= x"00";
-		    		end if;
-
-                    tx_fsm <= TX_START; 
-
-                -- Width Change: W[1-3] -> Tag 'W'
-                elsif cmd_buffer(0) = x"57" then
-                    pen_width <= cmd_buffer(1)(1 downto 0);
-                    tx_fsm <= TX_START;
-
-                -- Size Change: S[1-2] -> Tag 'S'
-                elsif cmd_buffer(0) = x"53" then
-                    sketch_size <= cmd_buffer(1)(0);
-                    tx_fsm <= TX_START;
+            when SEND_BUFFER =>
+                -- Loop through cmd_buffer and trigger UART for each byte
+		if cmd_buffer(0) = x"23" and buf_ptr >= 7 then
+        		-- Parse #RRGGBB (indices 1-2 for Red, 3-4 for Green, 5-6 for Blue)
+        		current_color(23 downto 16) <= ascii_to_hex(cmd_buffer(1)) & ascii_to_hex(cmd_buffer(2));
+        		current_color(15 downto 8)  <= ascii_to_hex(cmd_buffer(3)) & ascii_to_hex(cmd_buffer(4));
+        		current_color(7 downto 0)   <= ascii_to_hex(cmd_buffer(5)) & ascii_to_hex(cmd_buffer(6));
+    		end if;
+                if uart_fsm = UART_IDLE then
+                    uart_val_to_send <= cmd_buffer(buf_idx);
+                    uart_trigger <= '1';
+                    if buf_idx < buf_ptr - 1 then
+                        buf_idx <= buf_idx + 1;
+                    else
+                        buf_ptr <= 0; -- Clear buffer for next command
+                        main_state <= RUN;
+                    end if;
                 end if;
-                
-                buf_ptr <= 0;
-				main_state <= UPDATE_STATUS;
-
-		-- S: Size, C: Color (Hex), W: Width
-			when UPDATE_STATUS =>
-    			if lcd_busy = '0' then
-        			case status_ptr is
-            			when 0 => lcd_rs <= '0'; lcd_data <= x"C0"; -- Jump to Row 2
-           				when 1 => lcd_rs <= '1'; lcd_data <= x"53"; -- 'S'
-						when 2 => lcd_rs <= '1'; lcd_data <= x"3A"; -- ':'
-            			when 3 => lcd_rs <= '1';
-							if sketch_size = '1' then 
-        						lcd_data <= x"31"; -- Show '1'
-   							else 
-        						lcd_data <= x"32"; -- Show '2'
-    						end if;
-            			when 4 => lcd_rs <= '1'; lcd_data <= x"20"; -- space
-            			when 5 => lcd_rs <= '1'; lcd_data <= x"43"; -- 'C'
-            			when 6 => lcd_rs <= '1'; lcd_data <= x"3A"; -- ':'
-						when 7 => lcd_rs <= '1'; 
-							if current_color(23 downto 20) = x"F" then 
-								lcd_data <= x"46";
-							else lcd_data <= x"30"; end if;
-						when 8 => lcd_rs <= '1'; 
-							if current_color(19 downto 16) = x"F" then 
-								lcd_data <= x"46";
-							else lcd_data <= x"30"; end if;
-						when 9 => lcd_rs <= '1'; 
-							if current_color(15 downto 12) = x"F" then 
-								lcd_data <= x"46";
-							else lcd_data <= x"30"; end if;
-						when 10 => lcd_rs <= '1'; 
-							if current_color(11 downto 8) = x"F" then 
-								lcd_data <= x"46";
-							else lcd_data <= x"30"; end if;
-						when 11 => lcd_rs <= '1'; 
-							if current_color(7 downto 4) = x"F" then 
-								lcd_data <= x"46";
-							else lcd_data <= x"30"; end if;
-						when 12 => lcd_rs <= '1'; 
-							if current_color(3 downto 0) = x"F" then 
-								lcd_data <= x"46";
-							else lcd_data <= x"30"; end if;
-            			when 13 => lcd_rs <= '1'; lcd_data <= x"20"; -- space
-            			when 14 => lcd_rs <= '1'; lcd_data <= x"57"; -- 'W'
-						when 15 => lcd_rs <= '1'; lcd_data <= x"3A"; -- ':'
-            			when 16 => lcd_rs <= '1'; lcd_data <= x"30" or ("000000" & pen_width); -- Width '1', '2', or '3'
-           				when 17 => 
-                			lcd_rs <= '0'; 
-							lcd_data <= std_logic_vector(to_unsigned(128 + buf_ptr, 8)); -- Jump back to Row 1 for typing
-                			main_state <= IDLE;
-							status_ptr <= 0;
-            			when others => null;
-        			end case;
-        			lcd_en <= '1';
-        			status_ptr <= status_ptr + 1;
-    			end if;
-
-	    	when LCD_BS_STEP1 =>
-                if lcd_busy = '0' then
-                    lcd_rs <= '0'; lcd_data <= x"10"; -- Shift Left
-                    lcd_en <= '1'; main_state <= LCD_BS_STEP2;
-                end if;
-
-       	 	when LCD_BS_STEP2 =>
-                if lcd_busy = '0' then
-                    lcd_rs <= '1'; lcd_data <= x"20"; -- Print Space
-                    lcd_en <= '1'; main_state <= LCD_BS_STEP3;
-                end if;
-
-        	when LCD_BS_STEP3 =>
-                if lcd_busy = '0' then
-                    lcd_rs <= '0'; lcd_data <= x"10"; -- Shift Left again
-                    lcd_en <= '1'; main_state <= IDLE;
-                end if;
-
-        	when others => main_state <= IDLE;
         end case;
     end if;
 end process;
+
 
 
     -- ==========================================
